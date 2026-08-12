@@ -11,37 +11,9 @@ namespace WorkMonitorSwitcher.Services
             IReadOnlyCollection<DetectedMonitor> detected,
             IReadOnlyDictionary<string, MonitorInfo> aliasMap)
         {
-            var presentByKey = BuildDetectedMonitorLookup(detected);
-            var allKeys = new HashSet<string>(presentByKey.Keys, StringComparer.OrdinalIgnoreCase);
-            foreach (var key in aliasMap.Keys) allKeys.Add(key);
+            var presentByKey = BuildDetectedMonitorLookup(detected.Where(monitor => monitor.IsPresent));
 
-            var list = new List<DetectedMonitor>();
-            foreach (var key in allKeys)
-            {
-                if (presentByKey.TryGetValue(key, out var d))
-                {
-                    list.Add(d);
-                }
-                else
-                {
-                    var info = aliasMap.TryGetValue(key, out var mi) ? mi : new MonitorInfo();
-                    list.Add(new DetectedMonitor
-                    {
-                        StableKey = key,
-                        Name = GetAliasFor(aliasMap, key),
-                        DeviceName = info.LastDeviceName ?? string.Empty,
-                        MonitorKey = info.LastRegistryKey ?? string.Empty,
-                        MonitorId = string.Empty,
-                        InstanceId = string.Empty,
-                        SerialNumber = string.Empty,
-                        IsActive = false,
-                        IsPresent = false,
-                        PositionX = info.LastKnownX ?? 0
-                    });
-                }
-            }
-
-            return list
+            return presentByKey.Values
                 .OrderBy(m => GetPreferredOrder(aliasMap, m.StableKey))
                 .ThenBy(m => AliasHintRank(GetAliasFor(aliasMap, m.StableKey)))
                 .ThenBy(m => m.PositionX)

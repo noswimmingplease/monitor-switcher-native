@@ -46,6 +46,13 @@ namespace WorkMonitorSwitcher.Services
         private const int ErrorInvalidParameter = 87;
         private const int ErrorInsufficientBuffer = 122;
 
+        private const uint CmDrpDriver = 0x0000000A;
+        private const uint CrSuccess = 0x00000000;
+        private const uint CrBufferSmall = 0x0000001A;
+        private const uint RegSz = 1;
+        private const uint CmLocateDevNodeNormal = 0;
+        private const int MaxDriverPropertyBytes = 64 * 1024;
+
         private const uint QdcAllPaths = 0x00000001;
         private const uint QdcVirtualModeAware = 0x00000010;
         private const uint DisplayConfigPathActive = 0x00000001;
@@ -248,6 +255,11 @@ namespace WorkMonitorSwitcher.Services
                 }
 
                 var registryPath = BuildMonitorRegistryPath(selected.MonitorDevicePath);
+                var driverRegistryPath = TryReadDriverSoftwareKey(
+                    selected.InstanceId,
+                    out var currentDriverRegistryPath)
+                    ? currentDriverRegistryPath
+                    : string.Empty;
 
                 monitors.Add(new DetectedMonitor
                 {
@@ -255,6 +267,7 @@ namespace WorkMonitorSwitcher.Services
                     DeviceName = deviceName,
                     NativeTargetPath = selected.MonitorDevicePath,
                     MonitorKey = registryPath,
+                    DriverRegistryKey = driverRegistryPath,
                     MonitorId = selected.MonitorId,
                     InstanceId = selected.InstanceId,
                     SerialNumber = selected.SerialNumber,
@@ -430,6 +443,113 @@ namespace WorkMonitorSwitcher.Services
             return TryParseMonitorDevicePath(monitorDevicePath, out var hardwareId, out var instanceId)
                 ? $@"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Enum\DISPLAY\{hardwareId}\{instanceId}"
                 : string.Empty;
+        }
+
+        internal static bool TryReadDriverSoftwareKey(
+            string? deviceInstanceId,
+            out string driverRegistryKey)
+        {
+            driverRegistryKey = string.Empty;
+            var instanceId = (deviceInstanceId ?? string.Empty).Trim();
+            if (instanceId.Length == 0 ||
+                CM_Locate_DevNodeW(out var deviceInstance, instanceId, CmLocateDevNodeNormal) != CrSuccess)
+            {
+                return false;
+            }
+
+            uint propertyType = 0;
+            uint propertyLength = 0;
+            var sizeResult = CM_Get_DevNode_Registry_PropertyW(
+                deviceInstance,
+                CmDrpDriver,
+                out propertyType,
+                IntPtr.Zero,
+                ref propertyLength,
+                0);
+            if (sizeResult != CrBufferSmall ||
+                propertyType != RegSz ||
+                propertyLength < sizeof(char) ||
+                propertyLength > MaxDriverPropertyBytes ||
+                (propertyLength & 1) != 0)
+            {
+                return false;
+            }
+
+            var buffer = Marshal.AllocHGlobal(checked((int)propertyLength));
+            try
+            {
+                var readLength = propertyLength;
+                var readResult = CM_Get_DevNode_Registry_PropertyW(
+                    deviceInstance,
+                    CmDrpDriver,
+                    out propertyType,
+                    buffer,
+                    ref readLength,
+                    0);
+                if (readResult != CrSuccess ||
+                    propertyType != RegSz ||
+                    readLength < sizeof(char) ||
+                    readLength > propertyLength ||
+                    (readLength & 1) != 0)
+                {
+                    return false;
+                }
+
+                var rawDriverKey = Marshal.PtrToStringUni(buffer, checked((int)readLength / sizeof(char)))
+                    ?.TrimEnd('\0');
+                if (!TryNormalizeDriverSoftwareKey(rawDriverKey, out var normalisedDriverKey))
+                    return false;
+
+                driverRegistryKey =
+                    $@"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Class\{normalisedDriverKey}";
+                return true;
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+
+        internal static bool TryNormalizeDriverSoftwareKey(
+            string? rawValue,
+            out string normalisedDriverKey)
+        {
+            normalisedDriverKey = string.Empty;
+            var value = (rawValue ?? string.Empty).Trim().Trim('"').Replace('/', '\\');
+            if (value.StartsWith("MK:", StringComparison.OrdinalIgnoreCase))
+                value = value[3..].Trim();
+
+            value = value.TrimStart('\\');
+            string[] prefixes =
+            {
+                @"Registry\Machine\System\CurrentControlSet\Control\Class\",
+                @"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Class\",
+                @"HKLM\SYSTEM\CurrentControlSet\Control\Class\",
+                @"SYSTEM\CurrentControlSet\Control\Class\"
+            };
+            foreach (var prefix in prefixes)
+            {
+                if (!value.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                value = value[prefix.Length..];
+                break;
+            }
+
+            var parts = value.Split(
+                '\\',
+                StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            if (parts.Length != 2 ||
+                !Guid.TryParseExact(parts[0], "B", out var classGuid) ||
+                parts[1].Length != 4 ||
+                parts[1].Any(character => !char.IsAsciiHexDigit(character)))
+            {
+                return false;
+            }
+
+            normalisedDriverKey =
+                $"{classGuid.ToString("B").ToUpperInvariant()}\\{parts[1].ToUpperInvariant()}";
+            return true;
         }
 
         internal static bool TryDecodeEdid(byte[]? edid, out NativeEdidIdentity identity)
@@ -864,5 +984,20 @@ namespace WorkMonitorSwitcher.Services
         [DllImport("user32.dll")]
         private static extern int DisplayConfigGetDeviceInfo(
             ref DISPLAYCONFIG_TARGET_DEVICE_NAME requestPacket);
+
+        [DllImport("CfgMgr32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+        private static extern uint CM_Locate_DevNodeW(
+            out uint deviceInstance,
+            string deviceInstanceId,
+            uint flags);
+
+        [DllImport("CfgMgr32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+        private static extern uint CM_Get_DevNode_Registry_PropertyW(
+            uint deviceInstance,
+            uint property,
+            out uint registryDataType,
+            IntPtr buffer,
+            ref uint bufferLength,
+            uint flags);
     }
 }

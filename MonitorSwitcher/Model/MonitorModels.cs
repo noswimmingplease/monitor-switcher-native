@@ -55,6 +55,7 @@ namespace WorkMonitorSwitcher.Model
         public string DeviceName { get; set; } = string.Empty;  // \\.\DISPLAYn
         public string NativeTargetPath { get; set; } = string.Empty; // CCD monitor device-interface path
         public string MonitorKey { get; set; } = string.Empty;  // Registry path if available
+        public string DriverRegistryKey { get; set; } = string.Empty; // Current PnP driver software key
         public string MonitorId { get; set; } = string.Empty;   // EDID model/product
         public string InstanceId { get; set; } = string.Empty;  // PnP instance path
         public string SerialNumber { get; set; } = string.Empty;// EDID serial

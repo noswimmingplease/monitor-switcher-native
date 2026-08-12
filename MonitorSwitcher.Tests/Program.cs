@@ -15,8 +15,12 @@ var tests = new List<(string Name, Action Body)>
     ("ResolveEnableTargetArgs keeps a safe last-known display target", ResolveEnableTargetArgsKeepsSafeLastKnownDevice),
     ("ResolveEnableTargetArgs prefers live inactive device for the requested monitor", ResolveEnableTargetArgsPrefersLiveInactiveDevice),
     ("Detection assigns distinct fallback identities for duplicate or placeholder serials", DetectionAssignsDistinctFallbackIdentities),
-    ("MonitorPresentationBuilder handles duplicate stable keys without throwing", PresentationBuilderHandlesDuplicateStableKeys),
-    ("MonitorPresentationBuilder preserves disconnected detected state", PresentationBuilderPreservesDisconnectedState),
+    ("MonitorPresentationBuilder retains active monitors and deduplicates stable keys", PresentationBuilderRetainsActiveAndDeduplicatesStableKeys),
+    ("MonitorPresentationBuilder excludes saved-only aliases", PresentationBuilderExcludesSavedOnlyAliases),
+    ("MonitorPresentationBuilder excludes detected monitors that are not present", PresentationBuilderExcludesDetectedMonitorsThatAreNotPresent),
+    ("MonitorPresentationBuilder retains inactive monitors that are still present", PresentationBuilderRetainsInactiveMonitorsThatArePresent),
+    ("Native detection normalises documented driver software keys", NativeDetectionNormalisesDriverSoftwareKeys),
+    ("Legacy driver alias migration requires an exact one-to-one match", LegacyDriverAliasMigrationRequiresUniqueMatch),
     ("DisplayTopologyService preserves remaining geometry around the fallback primary", DisplayTopologyPreservesGeometryAroundFallbackPrimary),
     ("DisplayTopologyService requires exactly one saved primary origin", DisplayTopologyRequiresExactlyOneOrigin),
     ("DisplayTopologyService maps saved orientation to CCD rotation", DisplayTopologyMapsSavedOrientationToCcdRotation),
@@ -31,6 +35,7 @@ var tests = new List<(string Name, Action Body)>
     ("DisplayTopologyService exact-set preflight rejects missing and empty layouts", DisplayTopologyExactSetRejectsMissingAndEmptyLayouts),
     ("DisplayTopologyService counts only active saved monitor sections", DisplayTopologyCountsOnlyActiveSavedSections),
     ("AliasSettingsMapper applies aliases and primary selections", AliasSettingsMapperAppliesAliasesAndSelections),
+    ("AliasSettingsMapper preserves aliases hidden from Settings", AliasSettingsMapperPreservesHiddenAliases),
     ("AliasSettingsMapper clears fallback when it matches preferred primary", AliasSettingsMapperClearsFallbackWhenItMatchesPreferredPrimary),
     ("PrimaryMonitorPreference resolves configured primary targets", PrimaryMonitorPreferenceResolvesConfiguredTargets),
     ("AtomicFileWriter replaces existing files and keeps a backup", AtomicFileWriterReplacesExistingFilesAndKeepsBackup),
@@ -268,7 +273,7 @@ static void DetectionAssignsDistinctFallbackIdentities()
         "Expected every detected monitor to retain a distinct logical identity.");
 }
 
-static void PresentationBuilderHandlesDuplicateStableKeys()
+static void PresentationBuilderRetainsActiveAndDeduplicatesStableKeys()
 {
     var detected = new List<DetectedMonitor>
     {
@@ -296,10 +301,28 @@ static void PresentationBuilderHandlesDuplicateStableKeys()
 
     AssertEquals(1, rows.Count, "Expected duplicate stable keys to collapse to one row.");
     AssertEquals("\\\\.\\DISPLAY1", rows[0].DeviceName, "Expected active complete row to win.");
+    AssertTrue(rows[0].IsActive, "Expected the active detected monitor to remain visible.");
     AssertTrue(rows[0].IsPresent, "Expected selected row to remain present.");
 }
 
-static void PresentationBuilderPreservesDisconnectedState()
+static void PresentationBuilderExcludesSavedOnlyAliases()
+{
+    var aliases = new Dictionary<string, MonitorInfo>(StringComparer.OrdinalIgnoreCase)
+    {
+        ["SN:STALE"] = new MonitorInfo
+        {
+            Name = "Stale Monitor",
+            LastDeviceName = "\\\\.\\DISPLAY4",
+            LastKnownX = 2560
+        }
+    };
+
+    var rows = MonitorPresentationBuilder.Build(Array.Empty<DetectedMonitor>(), aliases);
+
+    AssertEquals(0, rows.Count, "Expected aliases without a detected present monitor to be excluded.");
+}
+
+static void PresentationBuilderExcludesDetectedMonitorsThatAreNotPresent()
 {
     var detected = new List<DetectedMonitor>
     {
@@ -308,8 +331,81 @@ static void PresentationBuilderPreservesDisconnectedState()
 
     var rows = MonitorPresentationBuilder.Build(detected, EmptyAliases());
 
-    AssertEquals(1, rows.Count, "Expected detected row to be shown.");
-    AssertFalse(rows[0].IsPresent, "Expected presentation builder not to force IsPresent to true.");
+    AssertEquals(0, rows.Count, "Expected a detected monitor marked not present to be excluded.");
+}
+
+static void PresentationBuilderRetainsInactiveMonitorsThatArePresent()
+{
+    var detected = new List<DetectedMonitor>
+    {
+        Monitor("SN:CONNECTED", "\\\\.\\DISPLAY3", "Connected", isPresent: true, isActive: false)
+    };
+
+    var rows = MonitorPresentationBuilder.Build(detected, EmptyAliases());
+
+    AssertEquals(1, rows.Count, "Expected a connected but disabled monitor to remain visible.");
+    AssertFalse(rows[0].IsActive, "Expected the retained monitor to remain inactive.");
+    AssertTrue(rows[0].IsPresent, "Expected the retained monitor to remain present.");
+}
+
+static void NativeDetectionNormalisesDriverSoftwareKeys()
+{
+    const string expected = "{4D36E96E-E325-11CE-BFC1-08002BE10318}\\0005";
+    AssertTrue(
+        NativeDisplayDetection.TryNormalizeDriverSoftwareKey(
+            @"{4d36e96e-e325-11ce-bfc1-08002be10318}\0005",
+            out var documentedValue),
+        "Expected DEVPKEY_Device_Driver format to be accepted.");
+    AssertEquals(expected, documentedValue, "Expected canonical driver software key.");
+
+    AssertTrue(
+        NativeDisplayDetection.TryNormalizeDriverSoftwareKey(
+            @"MK:\Registry\Machine\System\CurrentControlSet\Control\Class\{4d36e96e-e325-11ce-bfc1-08002be10318}\0005",
+            out var legacyValue),
+        "Expected a legacy MK class-registry key to be accepted.");
+    AssertEquals(expected, legacyValue, "Expected the legacy key to canonicalise identically.");
+
+    AssertFalse(
+        NativeDisplayDetection.TryNormalizeDriverSoftwareKey(@"MK:\Registry\Machine\Enum\DISPLAY\AOC\INSTANCE", out _),
+        "Expected a non-driver registry key to be rejected.");
+}
+
+static void LegacyDriverAliasMigrationRequiresUniqueMatch()
+{
+    const string driverPath =
+        @"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Class\{4d36e96e-e325-11ce-bfc1-08002be10318}\0005";
+    const string legacyKey =
+        @"MK:\Registry\Machine\System\CurrentControlSet\Control\Class\{4d36e96e-e325-11ce-bfc1-08002be10318}\0005";
+    var retained = new MonitorInfo
+    {
+        Name = "Display 3",
+        PreferredOrder = 2,
+        IsPreferredPrimary = true
+    };
+    var monitor = Monitor("SN:CURRENT", @"\\.\DISPLAY1", "AOC", isActive: true);
+    monitor.DriverRegistryKey = driverPath;
+    var candidates = new Dictionary<string, MonitorInfo>(StringComparer.OrdinalIgnoreCase)
+    {
+        [legacyKey] = retained,
+        ["SN:DISCONNECTED"] = new MonitorInfo { Name = "Keep disconnected" }
+    };
+
+    var match = Form1.FindUniqueLegacyDriverAliasMatch(monitor, new[] { monitor }, candidates);
+    AssertTrue(match.HasValue, "Expected one exact current and legacy driver-key match.");
+    var matchedAlias = match.GetValueOrDefault();
+    AssertEquals(legacyKey, matchedAlias.Key, "Expected the matching legacy MK alias.");
+    AssertTrue(ReferenceEquals(retained, matchedAlias.Value), "Expected all legacy metadata to be retained by reference.");
+
+    var duplicateCurrent = Monitor("SN:OTHER", @"\\.\DISPLAY2", "AOC", isActive: true);
+    duplicateCurrent.DriverRegistryKey = driverPath;
+    AssertFalse(
+        Form1.FindUniqueLegacyDriverAliasMatch(monitor, new[] { monitor, duplicateCurrent }, candidates).HasValue,
+        "Expected duplicate current driver keys to fail closed.");
+
+    candidates[@"MK:HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Class\{4d36e96e-e325-11ce-bfc1-08002be10318}\0005"] = new MonitorInfo();
+    AssertFalse(
+        Form1.FindUniqueLegacyDriverAliasMatch(monitor, new[] { monitor }, candidates).HasValue,
+        "Expected duplicate legacy driver keys to fail closed.");
 }
 
 static void DisplayTopologyPreservesGeometryAroundFallbackPrimary()
@@ -970,6 +1066,85 @@ static void AliasSettingsMapperAppliesAliasesAndSelections()
 
     AssertEquals("Left Monitor", rows[0].Alias, "Expected settings row to use saved alias.");
     AssertTrue(rows[0].IsFallbackPrimary, "Expected settings row to expose fallback selection.");
+}
+
+static void AliasSettingsMapperPreservesHiddenAliases()
+{
+    var dir = Path.Combine(Path.GetTempPath(), "MonitorSwitcher.Tests", Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(dir);
+
+    try
+    {
+        var aliases = new Dictionary<string, MonitorInfo>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["SN:VISIBLE"] = new MonitorInfo { Name = "Visible" },
+            ["SN:HIDDEN-PRIMARY"] = new MonitorInfo
+            {
+                Name = "Disconnected Primary",
+                LastDeviceName = @"\\.\DISPLAY7",
+                LastRegistryKey = @"\Registry\Machine\System\TestPrimary",
+                LastSerialNumber = "HIDDEN-PRIMARY",
+                LastInstanceId = @"DISPLAY\TEST\PRIMARY",
+                LastMonitorId = @"MONITOR\TESTPRIMARY",
+                LastKnownX = -2560,
+                KnownTargets = new List<string> { @"\\.\DISPLAY7", "Disconnected Primary" },
+                IsPreferredPrimary = true
+            },
+            ["SN:HIDDEN-FALLBACK"] = new MonitorInfo
+            {
+                Name = "Disconnected Fallback",
+                IsFallbackPrimary = true
+            }
+        };
+
+        // Settings passes only rows represented in the dialog to the mapper. Hidden aliases
+        // remain in the complete map that is subsequently persisted.
+        var representedAliases = new Dictionary<string, MonitorInfo>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["SN:VISIBLE"] = aliases["SN:VISIBLE"]
+        };
+
+        AliasSettingsMapper.ApplyMonitorSettings(
+            representedAliases,
+            Array.Empty<string>(),
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["SN:VISIBLE"] = "Renamed Visible"
+            },
+            preferredPrimaryKey: null,
+            fallbackPrimaryKey: null);
+
+        foreach (var pair in representedAliases)
+            aliases[pair.Key] = pair.Value;
+
+        var store = new AliasStore(dir);
+        var save = store.SaveWithResult(aliases);
+        AssertTrue(save.Success, "Expected the complete alias map to save successfully.");
+
+        var persisted = store.Load();
+        AssertEquals(3, persisted.Count, "Expected saving visible Settings rows not to delete hidden aliases.");
+        AssertEquals("Renamed Visible", persisted["SN:VISIBLE"].Name, "Expected the visible alias edit to be persisted.");
+
+        var hiddenPrimary = persisted["SN:HIDDEN-PRIMARY"];
+        AssertEquals("Disconnected Primary", hiddenPrimary.Name, "Expected the hidden alias name to be retained.");
+        AssertEquals(@"\\.\DISPLAY7", hiddenPrimary.LastDeviceName, "Expected the hidden last device name to be retained.");
+        AssertEquals(@"\Registry\Machine\System\TestPrimary", hiddenPrimary.LastRegistryKey,
+            "Expected the hidden registry identity to be retained.");
+        AssertEquals("HIDDEN-PRIMARY", hiddenPrimary.LastSerialNumber, "Expected the hidden serial to be retained.");
+        AssertEquals(@"DISPLAY\TEST\PRIMARY", hiddenPrimary.LastInstanceId, "Expected the hidden instance ID to be retained.");
+        AssertEquals(@"MONITOR\TESTPRIMARY", hiddenPrimary.LastMonitorId, "Expected the hidden monitor ID to be retained.");
+        AssertEquals<int?>(-2560, hiddenPrimary.LastKnownX, "Expected the hidden position hint to be retained.");
+        AssertSequence(hiddenPrimary.KnownTargets, @"\\.\DISPLAY7", "Disconnected Primary");
+        AssertTrue(hiddenPrimary.IsPreferredPrimary,
+            "Expected a hidden preferred-primary selection to survive saving unrelated visible rows.");
+        AssertTrue(persisted["SN:HIDDEN-FALLBACK"].IsFallbackPrimary,
+            "Expected a hidden fallback-primary selection to survive saving unrelated visible rows.");
+    }
+    finally
+    {
+        if (Directory.Exists(dir))
+            Directory.Delete(dir, recursive: true);
+    }
 }
 
 static void AliasSettingsMapperClearsFallbackWhenItMatchesPreferredPrimary()

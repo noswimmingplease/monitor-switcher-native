@@ -7,7 +7,7 @@ Source repository: https://github.com/Ci303/monitor-switcher-native
 ## What It Does
 
 - Detects arbitrary numbers of active, disabled, added and disconnected monitors using Windows display APIs.
-- Shows each saved monitor with a stable alias, connection state and quick enable or disable action.
+- Shows currently connected monitors, including disabled but still-present displays, with their activity state and a quick enable or disable action.
 - Saves and restores named layouts, including position, resolution, orientation and primary display.
 - Restores a selected profile after a physical reconnection or at sign-in when the monitor set matches safely.
 - Supports a preferred primary display, fallback primary display, dark mode, always-on-top and notification-area operation.
@@ -27,7 +27,7 @@ The application is designed for an extended desktop. Cloned or mirrored paths ar
 
 Monitor Switcher scans displays at start-up, when Windows reports a display or device change, and when **Refresh** is selected. Windows CCD supplies the active and available paths. Device-interface paths and reliable EDID serials are used for exact matching, so saved aliases can follow a physical display when Windows changes `\\.\DISPLAYn` names. Displays that report missing or duplicate identities fail closed where a physical match cannot be proved.
 
-Disconnected hardware cannot always be distinguished from a driver-retained inactive path. The application therefore records the last known display and will only perform an automatic restore when the complete current set can be matched reliably. Inconclusive state is shown as unavailable and no topology change is attempted.
+Disconnected hardware cannot always be distinguished from a driver-retained inactive path. The main monitor list therefore shows only displays that Windows currently reports as present, including present displays that are disabled. Saved identity and alias metadata remain stored when a monitor is absent so it can be recognised after reconnection. Automatic restore is attempted only when the complete current set can be matched reliably; inconclusive matches do not change the topology.
 
 ## Settings
 

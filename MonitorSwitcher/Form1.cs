@@ -2075,8 +2075,12 @@ namespace WorkMonitorSwitcher
                         return;
                     }
                 }
+                var aliasRows = BuildAliasSettingsRows();
+                var representedAliasKeys = aliasRows
+                    .Select(row => row.StableKey)
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
                 using var dlg = new AliasSettingsForm(
-                    BuildAliasSettingsRows(),
+                    aliasRows,
                     _uiSettings.DarkMode,
                     _uiSettings.AlwaysOnTop,
                     _uiSettings.MinimizeToTray,
@@ -2114,7 +2118,7 @@ namespace WorkMonitorSwitcher
 
                 CancelQueuedStartupLayoutRestore("apply settings");
                 CancelQueuedReconnectLayoutRestore("apply settings");
-                await ApplySettingsDialogResultsAsync(dlg);
+                await ApplySettingsDialogResultsAsync(dlg, representedAliasKeys);
             }
             catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
             {
@@ -2136,16 +2140,57 @@ namespace WorkMonitorSwitcher
         private List<AliasViewRow> BuildAliasSettingsRows()
             => AliasSettingsMapper.BuildRows(BuildPresentationList(), _aliasMap);
 
-        private async Task ApplySettingsDialogResultsAsync(AliasSettingsForm dlg)
+        private async Task ApplySettingsDialogResultsAsync(
+            AliasSettingsForm dlg,
+            IReadOnlySet<string> representedAliasKeys)
         {
             var warnings = new List<string>();
 
+            var representedAliases = new Dictionary<string, MonitorInfo>(StringComparer.OrdinalIgnoreCase);
+            foreach (var key in representedAliasKeys)
+            {
+                if (_aliasMap.TryGetValue(key, out var info))
+                    representedAliases[key] = info;
+            }
+
+            var representedMappings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var mapping in dlg.UpdatedMappings)
+            {
+                if (representedAliasKeys.Contains(mapping.Key))
+                    representedMappings[mapping.Key] = mapping.Value;
+            }
+
+            var representedPreferredKey = representedAliasKeys.Contains(dlg.PreferredPrimaryKey ?? string.Empty)
+                ? dlg.PreferredPrimaryKey
+                : null;
+            var representedFallbackKey = representedAliasKeys.Contains(dlg.FallbackPrimaryKey ?? string.Empty)
+                ? dlg.FallbackPrimaryKey
+                : null;
+            if (!string.IsNullOrWhiteSpace(representedPreferredKey) &&
+                string.Equals(representedPreferredKey, representedFallbackKey, StringComparison.OrdinalIgnoreCase))
+            {
+                representedFallbackKey = null;
+            }
+
+            ClearExistingMonitorPreferenceFlags(
+                clearPreferred: !string.IsNullOrWhiteSpace(representedPreferredKey),
+                clearFallback: !string.IsNullOrWhiteSpace(representedFallbackKey));
+
             AliasSettingsMapper.ApplyMonitorSettings(
-                _aliasMap,
-                dlg.RemovedKeys,
-                dlg.UpdatedMappings,
-                dlg.PreferredPrimaryKey,
-                dlg.FallbackPrimaryKey);
+                representedAliases,
+                dlg.RemovedKeys.Where(representedAliasKeys.Contains),
+                representedMappings,
+                representedPreferredKey,
+                representedFallbackKey);
+
+            foreach (var key in representedAliasKeys)
+            {
+                if (representedAliases.TryGetValue(key, out var info))
+                    _aliasMap[key] = info;
+                else
+                    _aliasMap.Remove(key);
+            }
+
             var aliasResult = _aliasStore.SaveWithResult(_aliasMap);
             LogPersistenceResult("save monitor aliases", aliasResult);
             if (!aliasResult.Success)
@@ -2455,15 +2500,6 @@ namespace WorkMonitorSwitcher
             ReconcileAliasesForDetected();
             SuppressShadowedDeviceFallbackDetections();
 
-            // First-run seeding if exactly three monitors and no aliases
-            if (_aliasMap.Count == 0 && _detected.Count == 3)
-            {
-                var ordered = _detected.OrderBy(d => d.PositionX).ToList();
-                SetAlias(ordered[0].StableKey, "Left Monitor");
-                SetAlias(ordered[1].StableKey, "Middle Monitor");
-                SetAlias(ordered[2].StableKey, "Right Monitor");
-            }
-
             // Keep alias metadata up to date + remember targets
             foreach (var m in _detected)
             {
@@ -2523,7 +2559,7 @@ namespace WorkMonitorSwitcher
                 int lastRowBottom = y;
                 foreach (var m in toShow)
                 {
-                    AddMonitorControls(m, GetAliasFor(m.StableKey), y);
+                    AddMonitorControls(m, GetPresentationTitle(m), y);
                     lastRowBottom = y + RowPanelHeight;
                     y += RowVerticalGap;
                 }
@@ -2650,13 +2686,10 @@ namespace WorkMonitorSwitcher
         {
             if (_summaryLabel == null) return;
 
-            int present = monitors.Count(m => m.IsPresent);
-            int active = monitors.Count(m => m.IsPresent && m.IsActive);
-            int savedOnly = monitors.Count - present;
+            int present = monitors.Count;
+            int active = monitors.Count(m => m.IsActive);
 
-            _summaryLabel.Text = savedOnly > 0
-                ? $"{active} of {present} active · {savedOnly} saved"
-                : $"{active} of {present} active";
+            _summaryLabel.Text = $"{active} of {present} active";
             _toolTip.SetToolTip(_summaryLabel, _summaryLabel.Text);
         }
 
@@ -2796,13 +2829,32 @@ namespace WorkMonitorSwitcher
             };
         }
 
-        private static string BuildMonitorDetailText(DetectedMonitor monitor)
+        private string BuildMonitorDetailText(DetectedMonitor monitor)
         {
+            var hasSavedAlias = _aliasMap.TryGetValue(monitor.StableKey, out var info) &&
+                                !string.IsNullOrWhiteSpace(info.Name);
+
+            if (hasSavedAlias && !string.IsNullOrWhiteSpace(monitor.Name))
+                return monitor.Name.Trim();
             if (!string.IsNullOrWhiteSpace(monitor.DeviceName))
                 return monitor.DeviceName.Replace(@"\\.\", string.Empty);
-            if (!string.IsNullOrWhiteSpace(monitor.Name))
-                return monitor.Name;
-            return monitor.IsPresent ? "Detected" : "Saved";
+            if (!string.IsNullOrWhiteSpace(monitor.SerialNumber))
+                return monitor.SerialNumber.Trim();
+            return "Detected";
+        }
+
+        private void ClearExistingMonitorPreferenceFlags(bool clearPreferred, bool clearFallback)
+        {
+            if (!clearPreferred && !clearFallback)
+                return;
+
+            foreach (var info in _aliasMap.Values)
+            {
+                if (clearPreferred)
+                    info.IsPreferredPrimary = false;
+                if (clearFallback)
+                    info.IsFallbackPrimary = false;
+            }
         }
 
         private static string BuildMonitorTooltipText(DetectedMonitor monitor)
@@ -3395,6 +3447,9 @@ namespace WorkMonitorSwitcher
             IEnumerable<KeyValuePair<string, MonitorInfo>> candidates = _aliasMap
                 .Where(kv => !detectedKeys.Contains(kv.Key));
 
+            var legacyDriverMatch = FindUniqueLegacyDriverAliasMatch(m, _detected, candidates);
+            if (legacyDriverMatch != null) return legacyDriverMatch;
+
             KeyValuePair<string, MonitorInfo>? TryMatch(Func<MonitorInfo, string?> selector, string? value)
             {
                 if (string.IsNullOrWhiteSpace(value)) return null;
@@ -3414,6 +3469,39 @@ namespace WorkMonitorSwitcher
             if (match != null) return match;
 
             return null;
+        }
+
+        internal static KeyValuePair<string, MonitorInfo>? FindUniqueLegacyDriverAliasMatch(
+            DetectedMonitor monitor,
+            IReadOnlyCollection<DetectedMonitor> detected,
+            IEnumerable<KeyValuePair<string, MonitorInfo>> candidates)
+        {
+            if (!NativeDisplayDetection.TryNormalizeDriverSoftwareKey(
+                    monitor.DriverRegistryKey,
+                    out var currentDriverKey))
+            {
+                return null;
+            }
+
+            var currentMatches = detected.Count(candidate =>
+                NativeDisplayDetection.TryNormalizeDriverSoftwareKey(
+                    candidate.DriverRegistryKey,
+                    out var candidateDriverKey) &&
+                candidateDriverKey.Equals(currentDriverKey, StringComparison.OrdinalIgnoreCase));
+            if (currentMatches != 1)
+                return null;
+
+            var legacyMatches = candidates
+                .Where(candidate => candidate.Key.TrimStart().StartsWith("MK:", StringComparison.OrdinalIgnoreCase))
+                .Where(candidate =>
+                    NativeDisplayDetection.TryNormalizeDriverSoftwareKey(
+                        candidate.Key,
+                        out var legacyDriverKey) &&
+                    legacyDriverKey.Equals(currentDriverKey, StringComparison.OrdinalIgnoreCase))
+                .Take(2)
+                .ToList();
+
+            return legacyMatches.Count == 1 ? legacyMatches[0] : null;
         }
 
         private void RemoveShadowedDeviceAliases()
@@ -3659,12 +3747,21 @@ namespace WorkMonitorSwitcher
                 : stableKey;
         }
 
-        private void SetAlias(string stableKey, string alias)
+        private string GetPresentationTitle(DetectedMonitor monitor)
         {
-            if (!_aliasMap.TryGetValue(stableKey, out var info))
-                info = new MonitorInfo();
-            info.Name = alias;
-            _aliasMap[stableKey] = info;
+            if (_aliasMap.TryGetValue(monitor.StableKey, out var info) &&
+                !string.IsNullOrWhiteSpace(info.Name))
+            {
+                return info.Name.Trim();
+            }
+
+            if (!string.IsNullOrWhiteSpace(monitor.Name))
+                return monitor.Name.Trim();
+
+            if (!string.IsNullOrWhiteSpace(monitor.DeviceName))
+                return monitor.DeviceName.Replace(@"\\.\", string.Empty);
+
+            return "Detected monitor";
         }
 
         private void LogDetectionSnapshotIfChanged()
