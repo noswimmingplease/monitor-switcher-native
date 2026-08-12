@@ -1,0 +1,50 @@
+# ---- .NET build output
+bin/
+obj/
+[Bb]uild/
+[Ll]og/
+
+# ---- Visual Studio / VS Code / Rider
+.vs/
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.idea/
+
+# ---- User-specific and workspace files
+*.user
+*.suo
+*.userprefs
+
+# ---- NuGet
+*.nupkg
+packages/
+.nuget/
+
+# ---- Test results
+[Tt]est[Rr]esult*
+*.trx
+*.coverage
+*.coveragexml
+
+# ---- Publish output
+publish/
+artifacts/
+
+# ---- Cache
+*.cache/
+**/obj/Debug/
+**/obj/Release/
+
+# ---- Logs
+*.log/
+
+# ---- OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- Local layout files
+MonitorSwitcher/monitor-layout.cfg

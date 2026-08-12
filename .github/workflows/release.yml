@@ -1,0 +1,391 @@
+name: Build Release Zip
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+  DOTNET_NOLOGO: 'true'
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to package for
+        required: false
+        type: string
+
+jobs:
+  build_release_zip:
+    runs-on: windows-latest
+    outputs:
+      attach_release: ${{ steps.build.outputs.attach_release }}
+      artifact_name: ${{ steps.build.outputs.artifact_name }}
+      checksum_name: ${{ steps.build.outputs.checksum_name }}
+      release_tag: ${{ steps.build.outputs.release_tag }}
+      zip_name: ${{ steps.build.outputs.zip_name }}
+
+    steps:
+      - name: Resolve build reference and version
+        id: build
+        shell: pwsh
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          REQUESTED_TAG: ${{ inputs.tag }}
+          RUN_NUMBER: ${{ github.run_number }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $tag = if ($env:EVENT_NAME -eq 'release') {
+            $env:RELEASE_TAG
+          } else {
+            $env:REQUESTED_TAG
+          }
+
+          if (-not [string]::IsNullOrWhiteSpace($tag)) {
+            if ($tag -cnotmatch '^v(?<version>(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))$') {
+              throw "Tag '$tag' must use the exact vX.Y.Z format."
+            }
+
+            $version = $Matches['version']
+            $versionParts = $version.Split('.') | ForEach-Object { [int]$_ }
+            if ($versionParts | Where-Object { $_ -gt 65534 }) {
+              throw "Tag '$tag' contains a version component greater than 65534, which is not valid assembly metadata."
+            }
+
+            $checkoutRef = "refs/tags/$tag"
+            $versionLabel = $tag
+            $assemblyVersion = "$version.0"
+            $informationalVersion = $version
+            $attachRelease = 'true'
+            $releaseTag = $tag
+          } else {
+            if ($env:EVENT_NAME -ne 'workflow_dispatch') {
+              throw 'A release event must provide a vX.Y.Z tag.'
+            }
+
+            $shortSha = $env:SOURCE_SHA.Substring(0, 7)
+            $version = "0.0.0-ci.$env:RUN_NUMBER"
+            $checkoutRef = $env:SOURCE_SHA
+            $versionLabel = "manual-$env:RUN_NUMBER"
+            $assemblyVersion = '0.0.0.0'
+            $informationalVersion = "$version+$shortSha"
+            $attachRelease = 'false'
+            $releaseTag = ''
+          }
+
+          $artifactName = "MonitorSwitcher-$versionLabel-win-x64"
+          $zipName = "$artifactName.zip"
+          $checksumName = "$zipName.sha256"
+
+          "assembly_version=$assemblyVersion" >> $env:GITHUB_OUTPUT
+          "attach_release=$attachRelease" >> $env:GITHUB_OUTPUT
+          "artifact_name=$artifactName" >> $env:GITHUB_OUTPUT
+          "checksum_name=$checksumName" >> $env:GITHUB_OUTPUT
+          "checkout_ref=$checkoutRef" >> $env:GITHUB_OUTPUT
+          "file_version=$assemblyVersion" >> $env:GITHUB_OUTPUT
+          "informational_version=$informationalVersion" >> $env:GITHUB_OUTPUT
+          "package_version=$version" >> $env:GITHUB_OUTPUT
+          "release_tag=$releaseTag" >> $env:GITHUB_OUTPUT
+          "zip_name=$zipName" >> $env:GITHUB_OUTPUT
+
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ steps.build.outputs.checkout_ref }}
+
+      - name: Verify checked-out reference
+        shell: pwsh
+        env:
+          EXPECTED_REF: ${{ steps.build.outputs.checkout_ref }}
+          RELEASE_TAG: ${{ steps.build.outputs.release_tag }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $actualCommit = (git rev-parse HEAD).Trim()
+
+          if (-not [string]::IsNullOrWhiteSpace($env:RELEASE_TAG)) {
+            $expectedCommit = (git rev-parse "$env:EXPECTED_REF^{commit}").Trim()
+          } else {
+            $expectedCommit = (git rev-parse $env:EXPECTED_REF).Trim()
+          }
+
+          if ($actualCommit -ne $expectedCommit) {
+            throw "Checkout mismatch: expected $expectedCommit but found $actualCommit."
+          }
+
+      - name: Verify native-only dependency boundary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $trackedBinaries = @(git ls-files -- '*.exe' '*.dll')
+          if ($trackedBinaries.Count -gt 0) {
+            throw "Repository unexpectedly tracks executable dependencies: $($trackedBinaries -join ', ')"
+          }
+
+          $projectFiles = @(git ls-files -- '*.csproj')
+          $packageReferences = @($projectFiles |
+            ForEach-Object { Select-String -LiteralPath $_ -Pattern '<PackageReference\b' })
+          if ($packageReferences.Count -gt 0) {
+            throw "Native-only projects must not add package dependencies: $($packageReferences.Path -join ', ')"
+          }
+
+          $runtimeNoticeName = 'DOTNET-RUNTIME-THIRD-PARTY-NOTICES.txt'
+          if (@(git ls-files -- $runtimeNoticeName).Count -ne 1) {
+            throw "$runtimeNoticeName must be tracked."
+          }
+          $runtimeNoticePath = Join-Path $PWD $runtimeNoticeName
+          if (-not (Test-Path -LiteralPath $runtimeNoticePath -PathType Leaf)) {
+            throw "$runtimeNoticeName is missing."
+          }
+          $runtimeNoticeText = [System.IO.File]::ReadAllText($runtimeNoticePath)
+          $canonicalNoticeBytes = [System.Text.UTF8Encoding]::new($false).GetBytes(
+            ($runtimeNoticeText -replace '\r?\n', "`r`n"))
+          $runtimeNoticeHash = [Convert]::ToHexString(
+            [System.Security.Cryptography.SHA256]::HashData($canonicalNoticeBytes))
+          $expectedRuntimeNoticeHash = 'B60B2912DA28EAA6518593C9E2EFB5334EE062D3C42E80D8FDFA806B3DC52977'
+          if ($runtimeNoticeHash -ne $expectedRuntimeNoticeHash) {
+            throw "$runtimeNoticeName does not match the reviewed .NET 8.0.30 runtime notice."
+          }
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        shell: pwsh
+        run: dotnet restore .\MonitorSwitcher.sln
+
+      - name: Build
+        shell: pwsh
+        run: dotnet build .\MonitorSwitcher.sln -c Release --no-restore
+
+      - name: Run regression tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $output = @(dotnet run --project .\MonitorSwitcher.Tests\MonitorSwitcher.Tests.csproj -c Release --no-build 2>&1)
+          $exitCode = $LASTEXITCODE
+          $ErrorActionPreference = 'Stop'
+          $lines = @($output | ForEach-Object { $_.ToString().TrimEnd() })
+          $lines | ForEach-Object { Write-Host $_ }
+          if ($exitCode -ne 0) {
+            throw "Regression runner failed with exit code $exitCode."
+          }
+          if ($lines -match '^FAIL ') {
+            throw 'Regression runner reported one or more FAIL lines.'
+          }
+          $finalLine = $lines | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Last 1
+          if ($finalLine -notmatch '^[0-9]+ test\(s\) passed\.$') {
+            throw 'Regression runner did not print its authoritative passed-test summary.'
+          }
+
+      - name: Publish app
+        shell: pwsh
+        env:
+          ASSEMBLY_VERSION: ${{ steps.build.outputs.assembly_version }}
+          FILE_VERSION: ${{ steps.build.outputs.file_version }}
+          INFORMATIONAL_VERSION: ${{ steps.build.outputs.informational_version }}
+          PACKAGE_VERSION: ${{ steps.build.outputs.package_version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $publishPath = Join-Path $PWD 'artifacts\publish'
+          if (Test-Path -LiteralPath $publishPath) {
+            Remove-Item -LiteralPath $publishPath -Recurse -Force
+          }
+
+          dotnet publish .\MonitorSwitcher\MonitorSwitcher.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained true `
+            -o .\artifacts\publish `
+            "-p:AssemblyVersion=$env:ASSEMBLY_VERSION" `
+            "-p:FileVersion=$env:FILE_VERSION" `
+            "-p:InformationalVersion=$env:INFORMATIONAL_VERSION" `
+            "-p:PackageVersion=$env:PACKAGE_VERSION" `
+            "-p:Version=$env:PACKAGE_VERSION" `
+            -p:ContinuousIntegrationBuild=true `
+            -p:IncludeSourceRevisionInInformationalVersion=false
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "dotnet publish failed with exit code $LASTEXITCODE."
+          }
+
+      - name: Verify published metadata, documentation and dependency boundary
+        shell: pwsh
+        env:
+          ASSEMBLY_VERSION: ${{ steps.build.outputs.assembly_version }}
+          FILE_VERSION: ${{ steps.build.outputs.file_version }}
+          INFORMATIONAL_VERSION: ${{ steps.build.outputs.informational_version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $publishDir = Resolve-Path .\artifacts\publish
+          $assemblyPath = Join-Path $publishDir 'MonitorSwitcher.dll'
+          $assemblyName = [System.Reflection.AssemblyName]::GetAssemblyName($assemblyPath)
+          $versionInfo = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($assemblyPath)
+
+          if ($assemblyName.Version.ToString() -ne $env:ASSEMBLY_VERSION) {
+            throw "Assembly version mismatch: expected $env:ASSEMBLY_VERSION, found $($assemblyName.Version)."
+          }
+          if ($versionInfo.FileVersion -ne $env:FILE_VERSION) {
+            throw "File version mismatch: expected $env:FILE_VERSION, found $($versionInfo.FileVersion)."
+          }
+          if ($versionInfo.ProductVersion -ne $env:INFORMATIONAL_VERSION) {
+            throw "Product version mismatch: expected $env:INFORMATIONAL_VERSION, found $($versionInfo.ProductVersion)."
+          }
+
+          foreach ($fileName in @(
+            'LICENSE',
+            'README.md',
+            'RELEASE_NOTES.md',
+            'THIRD-PARTY-NOTICES.md',
+            'DOTNET-RUNTIME-THIRD-PARTY-NOTICES.txt'
+          )) {
+            if (-not (Test-Path -LiteralPath (Join-Path $publishDir $fileName))) {
+              throw "Published output is missing $fileName."
+            }
+          }
+
+          $deps = Get-Content -Raw -LiteralPath (Join-Path $publishDir 'MonitorSwitcher.deps.json') |
+            ConvertFrom-Json
+          $runtimePackLibraries = @($deps.libraries.PSObject.Properties |
+            Where-Object { $_.Name -like 'runtimepack.Microsoft.NETCore.App.Runtime.win-x64/*' })
+          if ($runtimePackLibraries.Count -ne 1) {
+            throw 'Published dependency metadata does not identify exactly one x64 .NET runtime pack.'
+          }
+          $runtimePackVersion = $runtimePackLibraries[0].Name.Split('/', 2)[1]
+          $reviewedRuntimePackVersion = '8.0.30'
+          if ($runtimePackVersion -ne $reviewedRuntimePackVersion) {
+            throw "The resolved .NET runtime pack changed from $reviewedRuntimePackVersion to $runtimePackVersion. Refresh the tracked runtime notice and provenance before releasing."
+          }
+
+          $globalPackagesDir = if ([string]::IsNullOrWhiteSpace($env:NUGET_PACKAGES)) {
+            Join-Path $env:USERPROFILE '.nuget\packages'
+          } else {
+            $env:NUGET_PACKAGES
+          }
+          $resolvedRuntimeNotice = Join-Path $globalPackagesDir (
+            "microsoft.netcore.app.runtime.win-x64\$runtimePackVersion\THIRD-PARTY-NOTICES.TXT")
+          if (-not (Test-Path -LiteralPath $resolvedRuntimeNotice -PathType Leaf)) {
+            throw "The resolved runtime notice was not found at $resolvedRuntimeNotice."
+          }
+
+          $trackedRuntimeNotice = Join-Path $PWD 'DOTNET-RUNTIME-THIRD-PARTY-NOTICES.txt'
+          $publishedRuntimeNotice = Join-Path $publishDir 'DOTNET-RUNTIME-THIRD-PARTY-NOTICES.txt'
+          $resolvedNoticeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $resolvedRuntimeNotice).Hash
+          $trackedNoticeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $trackedRuntimeNotice).Hash
+          $publishedNoticeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $publishedRuntimeNotice).Hash
+          if ($trackedNoticeHash -ne $resolvedNoticeHash -or $publishedNoticeHash -ne $resolvedNoticeHash) {
+            throw 'The tracked or published .NET runtime notice does not match the resolved runtime pack.'
+          }
+
+          $unexpectedExecutables = @(Get-ChildItem -LiteralPath $publishDir -Recurse -File -Filter '*.exe' |
+            Where-Object { $_.Name -notin @('MonitorSwitcher.exe', 'createdump.exe') })
+          if ($unexpectedExecutables.Count -gt 0) {
+            throw "Publish output contains an unexpected executable: $($unexpectedExecutables.FullName -join ', ')"
+          }
+
+      - name: Create zip package
+        shell: pwsh
+        env:
+          CHECKSUM_NAME: ${{ steps.build.outputs.checksum_name }}
+          ZIP_NAME: ${{ steps.build.outputs.zip_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zipPath = Join-Path .\artifacts $env:ZIP_NAME
+          if (Test-Path -LiteralPath $zipPath) {
+            Remove-Item -LiteralPath $zipPath -Force
+          }
+          Add-Type -AssemblyName System.IO.Compression
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $publishRoot = (Resolve-Path .\artifacts\publish).Path
+          $files = @(Get-ChildItem -LiteralPath $publishRoot -Recurse -File | Sort-Object {
+            [System.IO.Path]::GetRelativePath($publishRoot, $_.FullName).Replace('\', '/')
+          })
+          if ($files.Count -eq 0) {
+            throw 'Publish output is empty.'
+          }
+
+          $zipStream = [System.IO.File]::Open(
+            $zipPath,
+            [System.IO.FileMode]::CreateNew,
+            [System.IO.FileAccess]::ReadWrite,
+            [System.IO.FileShare]::None)
+          try {
+            $archive = [System.IO.Compression.ZipArchive]::new(
+              $zipStream,
+              [System.IO.Compression.ZipArchiveMode]::Create,
+              $true,
+              [System.Text.Encoding]::UTF8)
+            try {
+              $fixedTimestamp = [System.DateTimeOffset]::new(
+                1980, 1, 1, 0, 0, 0, [System.TimeSpan]::Zero)
+              foreach ($file in $files) {
+                $relativePath = [System.IO.Path]::GetRelativePath($publishRoot, $file.FullName).Replace('\', '/')
+                $entry = $archive.CreateEntry(
+                  $relativePath,
+                  [System.IO.Compression.CompressionLevel]::Optimal)
+                $entry.LastWriteTime = $fixedTimestamp
+                $sourceStream = [System.IO.File]::OpenRead($file.FullName)
+                $entryStream = $entry.Open()
+                try {
+                  $sourceStream.CopyTo($entryStream)
+                } finally {
+                  $entryStream.Dispose()
+                  $sourceStream.Dispose()
+                }
+              }
+            } finally {
+              $archive.Dispose()
+            }
+          } finally {
+            $zipStream.Dispose()
+          }
+
+          $checksumPath = Join-Path .\artifacts $env:CHECKSUM_NAME
+          $hash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $env:ZIP_NAME" | Set-Content -LiteralPath $checksumPath -Encoding utf8 -NoNewline
+          Write-Host "SHA-256: $hash"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          if-no-files-found: error
+          name: ${{ steps.build.outputs.artifact_name }}
+          path: |
+            .\artifacts\${{ steps.build.outputs.zip_name }}
+            .\artifacts\${{ steps.build.outputs.checksum_name }}
+
+  attach_release:
+    needs: build_release_zip
+    if: needs.build_release_zip.outputs.attach_release == 'true'
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download packaged artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.build_release_zip.outputs.artifact_name }}
+          path: .\artifacts
+
+      - name: Attach zip to GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          CHECKSUM_NAME: ${{ needs.build_release_zip.outputs.checksum_name }}
+          RELEASE_TAG: ${{ needs.build_release_zip.outputs.release_tag }}
+          ZIP_NAME: ${{ needs.build_release_zip.outputs.zip_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zipPath = Join-Path .\artifacts $env:ZIP_NAME
+          $checksumPath = Join-Path .\artifacts $env:CHECKSUM_NAME
+          gh release upload $env:RELEASE_TAG $zipPath $checksumPath --clobber --repo $env:GH_REPO

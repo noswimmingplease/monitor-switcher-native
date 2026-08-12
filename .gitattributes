@@ -1,0 +1,2 @@
+# Keep the vendored runtime notice byte-identical to the upstream Windows runtime pack.
+DOTNET-RUNTIME-THIRD-PARTY-NOTICES.txt text eol=crlf

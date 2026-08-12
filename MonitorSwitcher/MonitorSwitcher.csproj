@@ -1,0 +1,55 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<OutputType>WinExe</OutputType>
+		<TargetFramework>net8.0-windows</TargetFramework>
+		<UseWindowsForms>true</UseWindowsForms>
+		<Nullable>enable</Nullable>
+		<Deterministic>true</Deterministic>
+		<ApplicationIcon>MonitorSwitcher_transparent.ico</ApplicationIcon>
+		<Version>0.0.0-local</Version>
+		<AssemblyVersion>0.0.0.0</AssemblyVersion>
+		<FileVersion>0.0.0.0</FileVersion>
+		<InformationalVersion>0.0.0-local</InformationalVersion>
+		<PackageLicenseExpression>GPL-3.0-only</PackageLicenseExpression>
+		<Copyright>Copyright (c) 2026 Ci303</Copyright>
+
+	</PropertyGroup>
+
+	<ItemGroup>
+	  <None Remove="MonitorSwitcher_transparent.ico" />
+	</ItemGroup>
+
+	<ItemGroup>
+	  <EmbeddedResource Update="Form1.resx">
+	    <DependentUpon>Form1.cs</DependentUpon>
+	  </EmbeddedResource>
+	</ItemGroup>
+
+	<ItemGroup>
+	  <InternalsVisibleTo Include="MonitorSwitcher.Tests" />
+	</ItemGroup>
+
+	<ItemGroup>
+	  <Content Include="MonitorSwitcher_transparent.ico">
+	    <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+	    <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+	  </Content>
+	  <Content Include="..\README.md" Link="README.md">
+	    <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+	  </Content>
+	  <Content Include="..\RELEASE_NOTES.md" Link="RELEASE_NOTES.md">
+	    <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+	  </Content>
+	  <Content Include="..\THIRD-PARTY-NOTICES.md" Link="THIRD-PARTY-NOTICES.md">
+	    <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+	  </Content>
+	  <Content Include="..\DOTNET-RUNTIME-THIRD-PARTY-NOTICES.txt" Link="DOTNET-RUNTIME-THIRD-PARTY-NOTICES.txt">
+	    <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+	  </Content>
+	  <Content Include="..\LICENSE" Link="LICENSE">
+	    <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+	  </Content>
+	</ItemGroup>
+
+</Project>
