@@ -14,6 +14,23 @@ internal static class NativeTopologyTests
         yield return ("Native exact restore selects a unique non-clone route assignment", ExactRouteSelectionIsUnique);
         yield return ("Native topology flags separate database lookup from persistent best mode", NativeFlagsAreCorrect);
         yield return ("Native topology mutation rejects stale display-name bindings", StaleDetectionBindingFailsClosed);
+        yield return ("Native enable placement uses rotated desktop width", EnablePlacementUsesRotatedDesktopWidth);
+    }
+
+    private static void EnablePlacementUsesRotatedDesktopWidth()
+    {
+        AssertEqual(2560,
+            DisplayTopologyService.CalculateEffectiveDesktopWidth(2560, 1440, rotation: 1),
+            "A landscape display should use its source width.");
+        AssertEqual(1440,
+            DisplayTopologyService.CalculateEffectiveDesktopWidth(2560, 1440, rotation: 4),
+            "A portrait display should use its rotated desktop width.");
+
+        const int portraitX = 2560;
+        var rightEdge = portraitX +
+                        DisplayTopologyService.CalculateEffectiveDesktopWidth(2560, 1440, rotation: 4);
+        AssertEqual(4000, rightEdge,
+            "The next display should be placed after the portrait display's effective 1440-pixel width.");
     }
 
     private static void StaleDetectionBindingFailsClosed()

@@ -637,7 +637,8 @@ namespace WorkMonitorSwitcher.Services
             if (primary == null || enabled == null)
                 return Failure("The original primary or newly enabled target could not be resolved after activation.");
 
-            int rightEdge = original.Entries.Max(entry => checked(entry.X + entry.Width));
+            int rightEdge = original.Entries.Max(entry => checked(
+                entry.X + CalculateEffectiveDesktopWidth(entry.Width, entry.Height, entry.Rotation)));
             var positions = new Dictionary<int, DisplayPosition>();
             foreach (var entry in current.Entries)
             {
@@ -668,7 +669,11 @@ namespace WorkMonitorSwitcher.Services
             DisplayTopologyResult failure,
             TopologySnapshot original)
         {
-            var rollbackDetails = new List<string>(failure.Details);
+            const string restoredMessage = "The previous display topology was restored and verified.";
+            const string restoredDetail = "The original display topology was restored and verified after the failed operation.";
+            var rollbackDetails = failure.Details
+                .Where(detail => !detail.Equals(restoredDetail, StringComparison.Ordinal))
+                .ToList();
             bool rollbackVerified = false;
             try
             {
@@ -713,8 +718,7 @@ namespace WorkMonitorSwitcher.Services
                     if (verified)
                     {
                         rollbackVerified = true;
-                        rollbackDetails.Add(
-                            "The original display topology was restored and verified after the failed operation.");
+                        rollbackDetails.Add(restoredDetail);
                     }
                     else
                     {
@@ -730,6 +734,12 @@ namespace WorkMonitorSwitcher.Services
                 rollbackDetails.Add($"Rollback of the original display topology failed: {ex.Message}");
             }
 
+            var failureMessage = failure.Message.EndsWith(
+                    $" {restoredMessage}",
+                    StringComparison.Ordinal)
+                ? failure.Message[..^(restoredMessage.Length + 1)]
+                : failure.Message;
+
             return new DisplayTopologyResult
             {
                 Success = false,
@@ -738,8 +748,8 @@ namespace WorkMonitorSwitcher.Services
                 RollbackAttempted = true,
                 RollbackVerified = rollbackVerified,
                 Message = rollbackVerified
-                    ? $"{failure.Message} The previous display topology was restored and verified."
-                    : $"{failure.Message} Rollback could not be verified; refresh Windows Display Settings before another monitor action.",
+                    ? $"{failureMessage} {restoredMessage}"
+                    : $"{failureMessage} Rollback could not be verified; refresh Windows Display Settings before another monitor action.",
                 Details = rollbackDetails
             };
         }
@@ -1701,6 +1711,18 @@ namespace WorkMonitorSwitcher.Services
 
         private static bool IsQuarterTurn(uint rotation)
             => rotation == 2 || rotation == 4;
+
+        internal static int CalculateEffectiveDesktopWidth(int sourceWidth, int sourceHeight, uint rotation)
+        {
+            if (sourceWidth <= 0)
+                throw new ArgumentOutOfRangeException(nameof(sourceWidth));
+            if (sourceHeight <= 0)
+                throw new ArgumentOutOfRangeException(nameof(sourceHeight));
+            if (rotation is < 1 or > 4)
+                throw new ArgumentOutOfRangeException(nameof(rotation));
+
+            return IsQuarterTurn(rotation) ? sourceHeight : sourceWidth;
+        }
 
         private static TopologySnapshot QueryActiveTopology()
             => QueryTopology(QdcOnlyActivePaths, includeInactivePaths: false);
