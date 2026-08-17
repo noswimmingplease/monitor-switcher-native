@@ -2051,6 +2051,8 @@ namespace WorkMonitorSwitcher
         // ---------- Settings dialog ----------
         private async void SettingsButton_Click(object? sender, EventArgs e)
         {
+            var restoreChangedProfile = false;
+
             if (!Visible || WindowState == FormWindowState.Minimized || !ShowInTaskbar)
                 ShowMainWindowForInteraction();
 
@@ -2118,7 +2120,7 @@ namespace WorkMonitorSwitcher
 
                 CancelQueuedStartupLayoutRestore("apply settings");
                 CancelQueuedReconnectLayoutRestore("apply settings");
-                await ApplySettingsDialogResultsAsync(dlg, representedAliasKeys);
+                restoreChangedProfile = await ApplySettingsDialogResultsAsync(dlg, representedAliasKeys);
             }
             catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
             {
@@ -2135,16 +2137,23 @@ namespace WorkMonitorSwitcher
             {
                 EndDisplayAction("settings");
             }
+
+            if (restoreChangedProfile)
+            {
+                _log.Write($"Applying newly selected layout profile '{SelectedLayoutProfileName()}'.");
+                await RestoreSelectedLayoutProfileAsync(showMessage: true);
+            }
         }
 
         private List<AliasViewRow> BuildAliasSettingsRows()
             => AliasSettingsMapper.BuildRows(BuildPresentationList(), _aliasMap);
 
-        private async Task ApplySettingsDialogResultsAsync(
+        private async Task<bool> ApplySettingsDialogResultsAsync(
             AliasSettingsForm dlg,
             IReadOnlySet<string> representedAliasKeys)
         {
             var warnings = new List<string>();
+            var previousLayoutProfile = SelectedLayoutProfileName();
 
             var representedAliases = new Dictionary<string, MonitorInfo>(StringComparer.OrdinalIgnoreCase);
             foreach (var key in representedAliasKeys)
@@ -2269,11 +2278,17 @@ namespace WorkMonitorSwitcher
 
             await RefreshMonitorsAndUiAsync(allowDuringDisplayAction: true);
             _lifetimeCancellation.Token.ThrowIfCancellationRequested();
+            var selectedLayoutProfileChanged = !string.Equals(
+                previousLayoutProfile,
+                SelectedLayoutProfileName(),
+                StringComparison.OrdinalIgnoreCase);
+            DisplayTopologyResult? primaryResult = null;
             var preferredPrimary = PrimaryMonitorPreference.ResolvePreferredPrimaryTarget(_detected, _aliasMap);
-            var primaryResult = !string.IsNullOrWhiteSpace(preferredPrimary)
-                ? await EnforcePreferredPrimaryIfActiveAsync("preferred primary after settings save")
-                : null;
-            if (!string.IsNullOrWhiteSpace(preferredPrimary) && primaryResult?.Success != true)
+            if (!selectedLayoutProfileChanged && !string.IsNullOrWhiteSpace(preferredPrimary))
+                primaryResult = await EnforcePreferredPrimaryIfActiveAsync("preferred primary after settings save");
+            if (!selectedLayoutProfileChanged &&
+                !string.IsNullOrWhiteSpace(preferredPrimary) &&
+                primaryResult?.Success != true)
             {
                 warnings.Add(primaryResult?.Message ?? "The preferred primary monitor could not be applied.");
             }
@@ -2290,6 +2305,8 @@ namespace WorkMonitorSwitcher
                     "Monitor Switcher",
                     _uiSettings.DarkMode);
             }
+
+            return selectedLayoutProfileChanged && settingsResult.Success;
         }
 
         private bool TryBeginDisplayAction(string actionName, bool showBusyMessage = true)
