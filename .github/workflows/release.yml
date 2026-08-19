@@ -459,58 +459,47 @@ jobs:
               --draft `
               --verify-tag `
               --title "Monitor Switcher $env:RELEASE_TAG" `
-              --generate-notes `
               --repo $env:GH_REPO
             if ($LASTEXITCODE -ne 0) {
               throw "Unable to create draft release $env:RELEASE_TAG."
             }
           }
 
-          $smartScreenHeading = '## Windows SmartScreen notice'
-          $releaseDescription = gh release view $env:RELEASE_TAG --repo $env:GH_REPO --json body |
-            ConvertFrom-Json
-          $currentBody = if ($null -eq $releaseDescription.body) {
-            ''
-          } else {
-            [string]$releaseDescription.body
-          }
-          if (-not $currentBody.Contains(
-              $smartScreenHeading,
-              [System.StringComparison]::Ordinal)) {
-            $releasePreamble = @(
-              '## Before upgrading',
-              '',
-              'Profiles created by the earlier external-tool version must be saved once with this release before they can enable a disabled monitor. Profiles control which monitors are enabled; Windows Display Settings remains authoritative for position, orientation, resolution and the primary display.',
-              '',
-              '## Download',
-              '',
-              "Download ``$env:ZIP_NAME`` and verify it against the attached ``$env:CHECKSUM_NAME`` before extracting it.",
-              '',
-              $smartScreenHeading,
-              '',
-              'This release is not Authenticode-signed. Windows Defender SmartScreen is therefore likely to show **Windows protected your PC**, **Unknown publisher**, or an unrecognised-app warning for a new download.',
-              '',
-              "Download only from this repository and verify ``$env:ZIP_NAME`` against ``$env:CHECKSUM_NAME``. After successful verification, a standard unmanaged Windows installation normally allows **More info** -> **Run anyway**. Smart App Control or an organisation's policy may block unsigned applications without offering that option.",
-              '',
-              "[Read Microsoft's SmartScreen guidance](https://learn.microsoft.com/windows/apps/package-and-deploy/smartscreen-reputation)."
-            ) -join [System.Environment]::NewLine
-            $updatedBody = if ([string]::IsNullOrWhiteSpace($currentBody)) {
-              $releasePreamble
-            } else {
-              $releasePreamble +
-                [System.Environment]::NewLine +
-                [System.Environment]::NewLine +
-                $currentBody
-            }
-            $notesPath = Join-Path $env:RUNNER_TEMP 'monitor-switcher-release-notes.md'
-            [System.IO.File]::WriteAllText(
-              $notesPath,
-              $updatedBody,
-              [System.Text.UTF8Encoding]::new($false))
-            gh release edit $env:RELEASE_TAG --notes-file $notesPath --repo $env:GH_REPO
-            if ($LASTEXITCODE -ne 0) {
-              throw 'Unable to add the Windows SmartScreen notice. The release remains a draft.'
-            }
+          $releaseBaseUrl = "https://github.com/$env:GH_REPO/releases/download/$env:RELEASE_TAG"
+          $releaseNotes = @(
+            '## Download',
+            '',
+            "[Download Monitor Switcher $env:RELEASE_TAG for Windows x64]($releaseBaseUrl/$env:ZIP_NAME)",
+            '',
+            'Extract the ZIP, then open `MonitorSwitcher.exe`. No installer, separate .NET download or external monitor utility is required. Requires 64-bit Windows 10 or Windows 11.',
+            '',
+            '## What''s new',
+            '',
+            '- Switch between named monitor profiles using native Windows display support.',
+            '- Profiles control which monitors are enabled; Windows keeps their position, orientation, resolution and primary-display setting.',
+            '- Improved physical-monitor matching, safer profile application and a clearer interface.',
+            '- Added built-in update checking and clearer diagnostics.',
+            '',
+            '## Upgrading from an older version',
+            '',
+            'Profiles created by the earlier external-tool version must be selected and saved once with this release before they can enable a disabled monitor.',
+            '',
+            '## Windows SmartScreen',
+            '',
+            'Monitor Switcher is open source but is not Authenticode-signed, so Windows may show an **Unknown publisher**, **Windows protected your PC** or unrecognised-app warning.',
+            '',
+            "Download only from this repository and compare the ZIP with the attached [``$env:CHECKSUM_NAME``]($releaseBaseUrl/$env:CHECKSUM_NAME). After successful verification, a standard unmanaged Windows installation normally allows **More info** -> **Run anyway**. Smart App Control or an organisation's policy may block unsigned applications.",
+            '',
+            "[Read Microsoft's SmartScreen guidance](https://learn.microsoft.com/windows/apps/package-and-deploy/smartscreen-reputation)."
+          ) -join [System.Environment]::NewLine
+          $notesPath = Join-Path $env:RUNNER_TEMP 'monitor-switcher-release-notes.md'
+          [System.IO.File]::WriteAllText(
+            $notesPath,
+            $releaseNotes,
+            [System.Text.UTF8Encoding]::new($false))
+          gh release edit $env:RELEASE_TAG --notes-file $notesPath --repo $env:GH_REPO
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Unable to set the end-user release notes. The release remains a draft.'
           }
 
           # Assets are only mutable while the release is a draft. Publishing is
