@@ -2358,6 +2358,16 @@ static void SettingsMonitorRowsFollowAttachedCount()
         "Expected the settings grid to follow the attached monitor count.");
     AssertEquals(8, AliasSettingsForm.CalculateVisibleMonitorRows(30),
         "Expected large monitor sets to scroll after eight visible rows.");
+
+    var font = System.Drawing.SystemFonts.MessageBoxFont ??
+        throw new InvalidOperationException("Windows did not provide a message-box font for the layout test.");
+    int compact = AliasSettingsForm.CalculateDetailsTextHeight("Alias: Left", font, 700);
+    int wrapped = AliasSettingsForm.CalculateDetailsTextHeight(
+        "Registry key: " + new string('A', 500),
+        font,
+        320);
+    AssertTrue(wrapped > compact,
+        "Expected the monitor information area to grow when long identity values wrap.");
 }
 
 static void Form1CapsLargeMonitorLists()

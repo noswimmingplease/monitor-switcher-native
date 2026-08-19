@@ -19,7 +19,7 @@
 
 - Monitor detection and layout work now runs asynchronously with shutdown cancellation and a visible degraded-detection warning.
 - Added versioned native profiles. Legacy profiles are upgraded by an explicit save while retaining the previous valid profile for rollback.
-- Reorganised Settings into compact themed General, Monitors and Profiles sections with consistent Save and Cancel actions. Monitor information now sits below a monitor-count-aware list, and the title bar retains its theme while inactive.
+- Reorganised Settings into compact themed General, Monitors and Profiles sections with consistent Save and Cancel actions. Selected-monitor information now sits below a monitor-count-aware list and expands to show its complete identity record without an internal scrollbar, while the title bar retains its theme when inactive.
 - Duplicate credible monitor serials now make native detection fail closed; placeholder or missing serials use exact current target paths where that remains unambiguous.
 - Large monitor lists are vertically scrollable and bounded to the current working area.
 - Refreshed the light and dark themes with clearer hierarchy, accessible primary actions, semantic status badges, softer monitor cards, and a proper degraded-detection banner.

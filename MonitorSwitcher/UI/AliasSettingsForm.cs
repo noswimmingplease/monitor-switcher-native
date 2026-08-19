@@ -53,7 +53,15 @@ namespace WorkMonitorSwitcher
         private readonly CheckBox _chkRestoreLayoutOnStartup = new() { Text = "Apply monitor profile on app start", AutoSize = true };
         private readonly Button _layoutProfileButton = new() { Text = "Default", AutoSize = true, MinimumSize = new Size(160, 30), TextAlign = ContentAlignment.MiddleLeft };
         private readonly Button _deleteProfile = new ThemedButton { Text = "Delete Profile", AutoSize = true, MinimumSize = new Size(106, 30), Tone = ThemedButtonTone.Danger };
-        private readonly TextBox _details = new() { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical };
+        private readonly TextBox _details = new()
+        {
+            Dock = DockStyle.Fill,
+            Multiline = true,
+            ReadOnly = true,
+            ScrollBars = ScrollBars.None,
+            WordWrap = true,
+            TabStop = false
+        };
         private readonly BindingList<AliasViewRow> _rows;
         private readonly string _diagnosticsText;
         private readonly List<string> _layoutProfileNames;
@@ -409,8 +417,10 @@ namespace WorkMonitorSwitcher
             int monitorDetailsHeight = 170;
             monitorLayout.Height = monitorGridHeight + monitorDetailsHeight + 44;
             monitorLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            monitorLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, monitorGridHeight));
-            monitorLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, monitorDetailsHeight));
+            var monitorGridRow = new RowStyle(SizeType.Absolute, monitorGridHeight);
+            var monitorDetailsRow = new RowStyle(SizeType.Absolute, monitorDetailsHeight);
+            monitorLayout.RowStyles.Add(monitorGridRow);
+            monitorLayout.RowStyles.Add(monitorDetailsRow);
             monitorLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
             monitorLayout.Controls.Add(_grid, 0, 0);
 
@@ -481,6 +491,46 @@ namespace WorkMonitorSwitcher
             profileGroup.Controls.Add(profileContent);
             profilesPage.Controls.Add(profileGroup);
 
+            bool updatingMonitorLayout = false;
+
+            void UpdateMonitorContentSize(bool resizeWindow)
+            {
+                if (updatingMonitorLayout)
+                    return;
+
+                updatingMonitorLayout = true;
+                try
+                {
+                    int rowCount = CalculateVisibleMonitorRows(_rows.Count);
+                    int gridHeight = _grid.ColumnHeadersHeight + (rowCount * _grid.RowTemplate.Height) + 4;
+                    int textWidth = Math.Max(240, detailsGroup.ClientSize.Width - detailsGroup.Padding.Horizontal - 8);
+                    int textHeight = CalculateDetailsTextHeight(_details.Text, _details.Font, textWidth);
+                    int detailsHeight = textHeight + detailsGroup.Padding.Vertical + detailsGroup.Margin.Vertical + 8;
+
+                    monitorGridRow.Height = gridHeight;
+                    monitorDetailsRow.Height = detailsHeight;
+                    monitorLayout.Height = gridHeight + detailsHeight + 44;
+                    _grid.ScrollBars = _rows.Count > 8
+                        ? ScrollBars.Vertical
+                        : ScrollBars.None;
+
+                    if (resizeWindow && monitorsPage.Visible)
+                    {
+                        int desiredClientHeight = 46 + bottom.Height + monitorsPage.Padding.Vertical + monitorLayout.Height + 12;
+                        int maxClientHeight = Math.Max(300, Screen.FromControl(this).WorkingArea.Height - 80);
+                        ClientSize = new Size(ClientSize.Width, Math.Min(desiredClientHeight, maxClientHeight));
+                    }
+                }
+                finally
+                {
+                    updatingMonitorLayout = false;
+                }
+            }
+
+            _details.TextChanged += (_, __) => UpdateMonitorContentSize(resizeWindow: true);
+            detailsGroup.ClientSizeChanged += (_, __) => UpdateMonitorContentSize(resizeWindow: false);
+            _rows.ListChanged += (_, __) => UpdateMonitorContentSize(resizeWindow: true);
+
             var pageHost = new Panel { Dock = DockStyle.Fill };
             pageHost.Controls.Add(profilesPage);
             pageHost.Controls.Add(monitorsPage);
@@ -520,6 +570,9 @@ namespace WorkMonitorSwitcher
 
                 if (resizeWindow)
                 {
+                    if (ReferenceEquals(page, monitorsPage))
+                        UpdateMonitorContentSize(resizeWindow: false);
+
                     int contentHeight = ReferenceEquals(page, generalPage)
                         ? generalLayout.Height
                         : ReferenceEquals(page, monitorsPage)
@@ -618,6 +671,20 @@ namespace WorkMonitorSwitcher
 
         internal static int CalculateVisibleMonitorRows(int monitorCount)
             => Math.Clamp(monitorCount, 1, 8);
+
+        internal static int CalculateDetailsTextHeight(string? text, Font font, int availableWidth)
+        {
+            int safeWidth = Math.Max(120, availableWidth);
+            var measured = TextRenderer.MeasureText(
+                string.IsNullOrWhiteSpace(text) ? " " : text,
+                font,
+                new Size(safeWidth, int.MaxValue),
+                TextFormatFlags.TextBoxControl |
+                TextFormatFlags.WordBreak |
+                TextFormatFlags.NoPrefix |
+                TextFormatFlags.NoPadding);
+            return Math.Max(font.Height + 8, measured.Height + 10);
+        }
 
         private void FitInitialSizeToContent(
             FlowLayoutPanel monitorActions,
@@ -818,25 +885,26 @@ namespace WorkMonitorSwitcher
             if (rowIndex < 0 || rowIndex >= _rows.Count)
             {
                 _details.Text = "Select a monitor to view saved identity details.";
+                _details.Select(0, 0);
+                _details.ScrollToCaret();
                 return;
             }
 
             var row = _rows[rowIndex];
             _details.Text =
-                $"Alias: {row.Alias}{Environment.NewLine}" +
-                $"Fallback primary: {(row.IsFallbackPrimary ? "Yes" : "No")}{Environment.NewLine}" +
-                $"{Environment.NewLine}" +
-                $"Stable key:{Environment.NewLine}{row.StableKeyFull}{Environment.NewLine}" +
-                $"{Environment.NewLine}" +
-                $"Registry key:{Environment.NewLine}{row.RegistryKey}{Environment.NewLine}" +
-                $"{Environment.NewLine}" +
+                $"Alias: {row.Alias}    Fallback primary: {(row.IsFallbackPrimary ? "Yes" : "No")}{Environment.NewLine}" +
+                Environment.NewLine +
+                $"Stable key: {row.StableKeyFull}{Environment.NewLine}" +
+                $"Registry key: {row.RegistryKey}{Environment.NewLine}" +
+                Environment.NewLine +
                 $"Device name: {row.DeviceName}{Environment.NewLine}" +
                 $"Monitor name: {row.MonitorName}{Environment.NewLine}" +
                 $"Monitor ID: {row.MonitorId}{Environment.NewLine}" +
                 $"Instance ID: {row.InstanceId}{Environment.NewLine}" +
                 $"Serial number: {row.SerialNumber}{Environment.NewLine}" +
-                $"{Environment.NewLine}" +
-                $"Known command targets:{Environment.NewLine}{row.KnownTargets}";
+                $"Known command targets: {row.KnownTargets}";
+            _details.Select(0, 0);
+            _details.ScrollToCaret();
         }
 
         private void OpenRegistryForSelectedRow()
