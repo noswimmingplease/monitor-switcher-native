@@ -683,7 +683,9 @@ namespace WorkMonitorSwitcher
                 TextFormatFlags.WordBreak |
                 TextFormatFlags.NoPrefix |
                 TextFormatFlags.NoPadding);
-            return Math.Max(font.Height + 8, measured.Height + 10);
+            // Keep one full line of reserve so moving the caret in this read-only
+            // text box cannot scroll the first line out of view.
+            return Math.Max((font.Height * 2) + 8, measured.Height + font.Height + 10);
         }
 
         private void FitInitialSizeToContent(

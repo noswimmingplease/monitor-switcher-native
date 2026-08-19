@@ -2368,6 +2368,8 @@ static void SettingsMonitorRowsFollowAttachedCount()
         320);
     AssertTrue(wrapped > compact,
         "Expected the monitor information area to grow when long identity values wrap.");
+    AssertTrue(compact >= (font.Height * 2),
+        "Expected one line of reserve so clicking the read-only details cannot scroll its first line away.");
 }
 
 static void Form1CapsLargeMonitorLists()
