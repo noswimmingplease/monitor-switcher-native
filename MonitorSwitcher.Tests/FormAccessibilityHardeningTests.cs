@@ -10,6 +10,7 @@ internal static class FormAccessibilityHardeningTests
         yield return ("Profile Apply requires healthy profile transactions", ProfileApplyRequiresHealthyTransactions);
         yield return ("Profile restore fails closed during topology quarantine", ProfileRestoreFailsClosedDuringTopologyQuarantine);
         yield return ("Profile membership preview describes every set change", ProfilePreviewDescribesSetChanges);
+        yield return ("Profile selection status uses concise action wording", ProfileSelectionStatusUsesConciseActionWording);
     }
 
     private static void ScaleLogicalMetrics()
@@ -51,10 +52,38 @@ internal static class FormAccessibilityHardeningTests
         AssertContains(preview, "Unavailable saved monitor: 1");
     }
 
+    private static void ProfileSelectionStatusUsesConciseActionWording()
+    {
+        AssertEqual(
+            "Current profile",
+            Form1.FormatProfileSelectionStatus(
+                exactSetActive: true,
+                applyEnabled: false,
+                unavailableReason: "unused"));
+        AssertEqual(
+            "Click Apply to use this profile",
+            Form1.FormatProfileSelectionStatus(
+                exactSetActive: false,
+                applyEnabled: true,
+                unavailableReason: "unused"));
+        AssertEqual(
+            "Profile unavailable",
+            Form1.FormatProfileSelectionStatus(
+                exactSetActive: false,
+                applyEnabled: false,
+                unavailableReason: "Profile unavailable"));
+    }
+
     private static void AssertEqual(int expected, int actual)
     {
         if (expected != actual)
             throw new InvalidOperationException($"Expected {expected}, got {actual}.");
+    }
+
+    private static void AssertEqual(string expected, string actual)
+    {
+        if (!string.Equals(expected, actual, StringComparison.Ordinal))
+            throw new InvalidOperationException($"Expected '{expected}', got '{actual}'.");
     }
 
     private static void AssertContains(string value, string expected)

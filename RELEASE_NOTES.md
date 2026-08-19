@@ -39,6 +39,7 @@
 - Cached updates retain the verified release archive and are rechecked against the current published checksum; extracted files are verified from that archive rather than trusting writable local metadata.
 - Release automation now builds and tests tagged code before attaching assets to a draft; publishing is the final step and public release assets are never replaced.
 - Improved Settings keyboard navigation, accessible section state, high-DPI action wrapping and working-area clamping.
+- Simplified the selected-profile status to **Current profile** or **Click Apply to use this profile**, while retaining the detailed monitor changes in tooltips and confirmations.
 
 ## v0.3.9 - 2026-07-06
 

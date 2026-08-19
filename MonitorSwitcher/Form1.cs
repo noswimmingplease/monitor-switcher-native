@@ -1014,7 +1014,7 @@ namespace WorkMonitorSwitcher
                         ToolTipText = profileCanApply
                             ? $"Apply '{profileName}' without changing monitor geometry."
                             : exactSetActive
-                                ? "This profile already matches the active monitor set."
+                                ? "Current profile."
                                 : !profilePairValid
                                     ? "This saved profile is incomplete or invalid."
                                     : GetProfileMenuUnavailableReason()
@@ -1296,10 +1296,16 @@ namespace WorkMonitorSwitcher
             var palette = _uiSettings.DarkMode ? ThemePalette.Dark() : ThemePalette.Light();
             Themer.ApplyButtonStyle(_btnRestoreLayout, palette);
             var preview = BuildProfileMembershipPreview(path, profilePairValid, exactSetActive);
+            var profileStatus = FormatProfileSelectionStatus(
+                exactSetActive,
+                _btnRestoreLayout.Enabled,
+                preview);
             if (_profilePreviewLabel != null)
             {
-                _profilePreviewLabel.Text = preview;
-                _profilePreviewLabel.AccessibleDescription = preview;
+                _profilePreviewLabel.Text = profileStatus;
+                _profilePreviewLabel.AccessibleDescription = profileStatus.Equals(preview, StringComparison.Ordinal)
+                    ? preview
+                    : $"{profileStatus}. {preview}";
                 _profilePreviewLabel.ForeColor = _topologyActionsQuarantined
                     ? palette.StatusWarn
                     : palette.TextSubtle;
@@ -1336,6 +1342,18 @@ namespace WorkMonitorSwitcher
         internal static bool CanAttemptProfileRestore(bool topologyActionsQuarantined)
             => !topologyActionsQuarantined;
 
+        internal static string FormatProfileSelectionStatus(
+            bool exactSetActive,
+            bool applyEnabled,
+            string unavailableReason)
+        {
+            if (exactSetActive)
+                return "Current profile";
+            return applyEnabled
+                ? "Click Apply to use this profile"
+                : unavailableReason;
+        }
+
         private string GetProfileApplyUnavailableReason(bool profilePairValid, bool exactSetActive)
         {
             if (_topologyActionsQuarantined)
@@ -1370,7 +1388,7 @@ namespace WorkMonitorSwitcher
                 previewDetected.Count == 0)
                 return "Monitor identities are not currently reliable enough to preview this profile.";
             if (exactSetActive)
-                return "This profile already matches the active monitor set.";
+                return "Current profile";
 
             try
             {
