@@ -1787,18 +1787,22 @@ namespace WorkMonitorSwitcher
 
         private async Task RestoreSelectedLayoutProfileAsync(
             bool showMessage,
-            bool isStartupRestore = false)
+            bool isStartupRestore = false,
+            bool displayActionAlreadyHeld = false)
         {
-            if (!await WaitForPendingMonitorRefreshAsync())
-                return;
-            if (!TryBeginDisplayAction("restore layout", showMessage))
+            if (!displayActionAlreadyHeld)
             {
-                if (isStartupRestore && _uiSettings.RestoreLayoutOnStartup)
+                if (!await WaitForPendingMonitorRefreshAsync())
+                    return;
+                if (!TryBeginDisplayAction("restore layout", showMessage))
                 {
-                    _log.Write("Deferred startup layout restore after losing the display-action gate race.");
-                    QueueStartupLayoutRestore();
+                    if (isStartupRestore && _uiSettings.RestoreLayoutOnStartup)
+                    {
+                        _log.Write("Deferred startup layout restore after losing the display-action gate race.");
+                        QueueStartupLayoutRestore();
+                    }
+                    return;
                 }
-                return;
             }
 
             try
@@ -1857,11 +1861,15 @@ namespace WorkMonitorSwitcher
                     }
                     else
                     {
+                        var exactSetMessage = displayActionAlreadyHeld
+                            ? $"Applying layout profile '{profile}' will enable displays saved in the profile " +
+                              "and disable currently active displays that are not in it. Continue?"
+                            : $"Restoring '{profile}' requires an exact display-set restore. " +
+                              "Windows may enable monitors saved in the profile and disable currently active monitors that are not in it. Continue?";
                         var choice = MessageBox.Show(
                             this,
-                            $"Restoring '{profile}' requires an exact display-set restore. " +
-                            "Windows may enable monitors saved in the profile and disable currently active monitors that are not in it. Continue?",
-                            "Restore Monitor Set",
+                            exactSetMessage,
+                            displayActionAlreadyHeld ? "Apply Layout Profile" : "Restore Monitor Set",
                             MessageBoxButtons.YesNo,
                             MessageBoxIcon.Warning);
                         if (choice != DialogResult.Yes)
@@ -1920,7 +1928,15 @@ namespace WorkMonitorSwitcher
                 }
 
                 if (showMessage)
-                    ThemedMessageBox.Info(this, $"Layout profile '{profile}' restored.", "Restore Layout", _uiSettings.DarkMode);
+                {
+                    ThemedMessageBox.Info(
+                        this,
+                        displayActionAlreadyHeld
+                            ? $"Layout profile '{profile}' applied."
+                            : $"Layout profile '{profile}' restored.",
+                        displayActionAlreadyHeld ? "Apply Layout Profile" : "Restore Layout",
+                        _uiSettings.DarkMode);
+                }
             }
             catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
             {
@@ -1928,7 +1944,8 @@ namespace WorkMonitorSwitcher
             }
             finally
             {
-                EndDisplayAction("restore layout");
+                if (!displayActionAlreadyHeld)
+                    EndDisplayAction("restore layout");
             }
         }
 
@@ -2121,6 +2138,31 @@ namespace WorkMonitorSwitcher
                 CancelQueuedStartupLayoutRestore("apply settings");
                 CancelQueuedReconnectLayoutRestore("apply settings");
                 restoreChangedProfile = await ApplySettingsDialogResultsAsync(dlg, representedAliasKeys);
+                if (restoreChangedProfile)
+                {
+                    _log.Write($"Applying newly selected layout profile '{SelectedLayoutProfileName()}'.");
+                    var restoreButton = _btnRestoreLayout;
+                    var restoreButtonText = restoreButton?.Text;
+                    if (restoreButton != null)
+                    {
+                        restoreButton.Text = "Applying…";
+                        restoreButton.Enabled = false;
+                    }
+                    try
+                    {
+                        await RestoreSelectedLayoutProfileAsync(
+                            showMessage: true,
+                            displayActionAlreadyHeld: true);
+                    }
+                    finally
+                    {
+                        if (restoreButton != null)
+                        {
+                            restoreButton.Text = restoreButtonText ?? "Restore";
+                            restoreButton.Enabled = true;
+                        }
+                    }
+                }
             }
             catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
             {
@@ -2138,11 +2180,6 @@ namespace WorkMonitorSwitcher
                 EndDisplayAction("settings");
             }
 
-            if (restoreChangedProfile)
-            {
-                _log.Write($"Applying newly selected layout profile '{SelectedLayoutProfileName()}'.");
-                await RestoreSelectedLayoutProfileAsync(showMessage: true);
-            }
         }
 
         private List<AliasViewRow> BuildAliasSettingsRows()

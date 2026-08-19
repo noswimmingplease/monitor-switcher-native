@@ -58,6 +58,7 @@ namespace WorkMonitorSwitcher
         private readonly BindingList<AliasViewRow> _rows;
         private readonly string _diagnosticsText;
         private readonly List<string> _layoutProfileNames;
+        private readonly string _initialSelectedLayoutProfile;
         private string _selectedLayoutProfile;
         private ContextMenuStrip? _layoutProfileMenu;
         private readonly ToolTip _toolTip = new() { InitialDelay = 350, ReshowDelay = 100, AutoPopDelay = 8000 };
@@ -119,6 +120,7 @@ namespace WorkMonitorSwitcher
             if (_layoutProfileNames.Count == 0)
                 _layoutProfileNames.Add("Default");
             _selectedLayoutProfile = string.IsNullOrWhiteSpace(selectedLayoutProfile) ? "Default" : selectedLayoutProfile.Trim();
+            _initialSelectedLayoutProfile = _selectedLayoutProfile;
             if (!_layoutProfileNames.Any(p => p.Equals(_selectedLayoutProfile, StringComparison.OrdinalIgnoreCase)))
                 _layoutProfileNames.Add(_selectedLayoutProfile);
 
@@ -597,6 +599,11 @@ namespace WorkMonitorSwitcher
         {
             _selectedLayoutProfile = string.IsNullOrWhiteSpace(profile) ? "Default" : profile.Trim();
             _layoutProfileButton.Text = _selectedLayoutProfile;
+            _ok.Text = _selectedLayoutProfile.Equals(
+                _initialSelectedLayoutProfile,
+                StringComparison.OrdinalIgnoreCase)
+                ? "Save"
+                : "Save && Apply";
             BuildLayoutProfileMenu();
         }
 
