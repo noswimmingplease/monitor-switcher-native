@@ -3,7 +3,6 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
-using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -1552,69 +1551,6 @@ namespace WorkMonitorSwitcher
             }
         }
 
-        private async Task<PersistenceResult> AutoSaveSelectedLayoutBeforeDisableAsync()
-        {
-            var profile = SelectedLayoutProfileName();
-            var path = SelectedLayoutPath();
-
-            if (!_profileTransactionsHealthy)
-            {
-                _log.Write(
-                    $"Skipped automatic layout profile save for '{profile}' because an earlier profile transaction could not be recovered safely.");
-                return PersistenceResult.Failed(
-                    "Layout profiles are in an unresolved recovery state. See diagnostics.log; no monitor was disabled.");
-            }
-
-            if (!_uiSettings.AutoSaveLayoutBeforeDisable)
-            {
-                _log.Write($"Skipped automatic layout profile save before disable because auto-save is disabled. Profile '{profile}' at {path} remains unchanged.");
-                return PersistenceResult.Unchanged();
-            }
-
-            _log.Write($"Automatic layout profile save before disable requested for '{profile}' at {path}.");
-
-            if (!File.Exists(path))
-            {
-                return PersistenceResult.Failed(
-                    $"Layout profile '{profile}' has not been saved yet. Save it before disabling a monitor, or turn off automatic save-before-disable.");
-            }
-
-            var detection = await _detectSvc.DetectWithStatusAsync(_lifetimeCancellation.Token);
-            _lifetimeCancellation.Token.ThrowIfCancellationRequested();
-            if (detection.UsedScreenFallback)
-            {
-                return PersistenceResult.Failed(
-                    "Monitor identities could not be verified reliably. No profile was overwritten and no monitor was disabled.");
-            }
-
-            var savedIdentities = LayoutIdentityStore.Load(path);
-            if (!DisplayTopologyService.IsExactSavedMonitorSetActive(
-                    path,
-                    detection.Monitors,
-                    savedIdentities))
-            {
-                return PersistenceResult.Failed(
-                    $"The currently active physical monitor set does not exactly match profile '{profile}'. " +
-                    "Automatic save was stopped so a disconnected monitor is not removed from the profile.");
-            }
-
-            if (File.Exists(path) && !TryCreateAutoSaveBackup(profile, path, out var backupPath, out var backupError))
-            {
-                _log.Write($"Skipped automatic layout profile save for '{profile}' because backup failed: {backupError}");
-                return PersistenceResult.Failed(
-                    $"A safe backup of profile '{profile}' could not be created: {backupError}");
-            }
-
-            var saveResult = await SaveLayoutProfileTransactionAsync(profile, path, "Automatically saved");
-            _lifetimeCancellation.Token.ThrowIfCancellationRequested();
-            _log.Write(saveResult.Success
-                ? $"Automatically saved layout profile '{profile}' before disable to {path}."
-                : $"Failed to automatically save layout profile '{profile}' before disable: {saveResult.ErrorMessage}");
-            if (!string.IsNullOrWhiteSpace(saveResult.WarningMessage))
-                _log.Write($"Automatic layout profile save warning for '{profile}': {saveResult.WarningMessage}");
-            return saveResult;
-        }
-
         private async Task<PersistenceResult> SaveLayoutProfileTransactionAsync(
             string profile,
             string layoutPath,
@@ -1692,72 +1628,6 @@ namespace WorkMonitorSwitcher
             {
                 LayoutProfileTransaction.DeleteStagingArtifacts(stagingPath);
             }
-        }
-
-        private bool TryCreateAutoSaveBackup(
-            string profile,
-            string layoutPath,
-            out string backupPath,
-            out string errorMessage)
-        {
-            backupPath = string.Empty;
-            errorMessage = string.Empty;
-
-            try
-            {
-                var directory = Path.GetDirectoryName(layoutPath);
-                if (!string.IsNullOrWhiteSpace(directory))
-                    Directory.CreateDirectory(directory);
-
-                backupPath = NextAutoSaveBackupPath(layoutPath, DateTime.Now);
-                File.Copy(layoutPath, backupPath, overwrite: false);
-                var identityPath = LayoutIdentityStore.GetIdentityPath(layoutPath);
-                if (File.Exists(identityPath))
-                {
-                    var backupIdentityPath = LayoutIdentityStore.GetIdentityPath(backupPath);
-                    var identityBackupCreated = false;
-                    try
-                    {
-                        File.Copy(identityPath, backupIdentityPath, overwrite: false);
-                        identityBackupCreated = true;
-                    }
-                    catch
-                    {
-                        try { File.Delete(backupPath); } catch { /* best-effort rollback */ }
-                        if (identityBackupCreated)
-                        {
-                            try { File.Delete(backupIdentityPath); } catch { /* best-effort rollback */ }
-                        }
-                        throw;
-                    }
-                }
-                _log.Write($"Backed up layout profile '{profile}' before automatic save to {backupPath}.");
-                return true;
-            }
-            catch (Exception ex)
-            {
-                errorMessage = ex.Message;
-                return false;
-            }
-        }
-
-        internal static string NextAutoSaveBackupPath(string layoutPath, DateTime timestamp)
-        {
-            var stamp = timestamp.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
-            var basePath = $"{layoutPath}.autosave-{stamp}.bak";
-            if (!File.Exists(basePath) &&
-                !File.Exists(LayoutIdentityStore.GetIdentityPath(basePath)))
-                return basePath;
-
-            for (int i = 2; i < 1000; i++)
-            {
-                var candidate = $"{layoutPath}.autosave-{stamp}-{i}.bak";
-                if (!File.Exists(candidate) &&
-                    !File.Exists(LayoutIdentityStore.GetIdentityPath(candidate)))
-                    return candidate;
-            }
-
-            return $"{layoutPath}.autosave-{stamp}-{Guid.NewGuid():N}.bak";
         }
 
         internal static Size CalculateScrollableClientSize(
@@ -2079,7 +1949,6 @@ namespace WorkMonitorSwitcher
                     _uiSettings.MinimizeToTray,
                     _startupEnabledForCurrentExecutable,
                     _uiSettings.ConfirmBeforeDisable,
-                    _uiSettings.AutoSaveLayoutBeforeDisable,
                     _uiSettings.RestoreLayoutOnStartup,
                     _profileStore.LoadProfileNames(),
                     SelectedLayoutProfileName(),
@@ -2260,9 +2129,6 @@ namespace WorkMonitorSwitcher
 
             if (dlg.ConfirmBeforeDisableResult.HasValue)
                 _uiSettings.ConfirmBeforeDisable = dlg.ConfirmBeforeDisableResult.Value;
-
-            if (dlg.AutoSaveLayoutBeforeDisableResult.HasValue)
-                _uiSettings.AutoSaveLayoutBeforeDisable = dlg.AutoSaveLayoutBeforeDisableResult.Value;
 
             if (dlg.RestoreLayoutOnStartupResult.HasValue)
                 _uiSettings.RestoreLayoutOnStartup = dlg.RestoreLayoutOnStartupResult.Value;
@@ -3244,20 +3110,6 @@ namespace WorkMonitorSwitcher
 
                 try
                 {
-                    // Capture baseline layout before any primary-monitor topology change.
-                    if (_uiSettings.AutoSaveLayoutBeforeDisable)
-                    {
-                        var autoSave = await AutoSaveSelectedLayoutBeforeDisableAsync();
-                        if (!autoSave.Success)
-                        {
-                            _log.Write($"Disable stopped because automatic profile save was unsafe or failed: {autoSave.ErrorMessage}");
-                            ThemedMessageBox.Warn(this,
-                                autoSave.ErrorMessage,
-                                "Monitor Switcher", _uiSettings.DarkMode);
-                            return;
-                        }
-                    }
-
                     _lifetimeCancellation.Token.ThrowIfCancellationRequested();
 
                     CancelQueuedStartupLayoutRestore("disable monitor");

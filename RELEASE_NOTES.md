@@ -13,11 +13,13 @@
 - Start-up restores are cancelled when a manual display action begins, and launching a portable or rollback copy no longer retargets the existing Windows start-up entry.
 - Corrupt or missing JSON settings recover from valid backups without replacing the good backup.
 - Profile deletion now removes exact sidecars/backups transactionally and cannot resurrect a deleted index entry during backup recovery.
+- Removed automatic profile overwrites before disabling a monitor. Profiles now change only when explicitly saved.
 
 ### Improved
 
 - Monitor detection and layout work now runs asynchronously with shutdown cancellation and a visible degraded-detection warning.
-- Added versioned native profiles. Legacy profiles are upgraded by an explicit save, or by configured save-before-disable after an exact identity check, while retaining the previous valid profile for rollback.
+- Added versioned native profiles. Legacy profiles are upgraded by an explicit save while retaining the previous valid profile for rollback.
+- Reorganised Settings into focused General, Monitors and Profiles tabs with consistent Save and Cancel actions.
 - Duplicate credible monitor serials now make native detection fail closed; placeholder or missing serials use exact current target paths where that remains unambiguous.
 - Large monitor lists are vertically scrollable and bounded to the current working area.
 - Refreshed the light and dark themes with clearer hierarchy, accessible primary actions, semantic status badges, softer monitor cards, and a proper degraded-detection banner.

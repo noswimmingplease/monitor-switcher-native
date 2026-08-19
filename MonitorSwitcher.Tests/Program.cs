@@ -73,11 +73,10 @@ var tests = new List<(string Name, Action Body)>
     ("Reconnect restore tracker Reset requires a fresh baseline", ReconnectTrackerResetRequiresFreshBaseline),
     ("Reconnect detection rejects fallback and cross-event snapshots", ReconnectDetectionRejectsInconclusiveSnapshots),
     ("Physical reconnect evidence is consumed by generation", PhysicalReconnectEvidenceIsConsumedByGeneration),
-    ("UiSettings disables automatic layout saves by default", UiSettingsDisablesAutomaticLayoutSavesByDefault),
+    ("UiSettings disables startup profile application by default", UiSettingsDisablesStartupProfileApplicationByDefault),
     ("Profile set-change confirmation follows the disable confirmation setting", ProfileSetChangeConfirmationFollowsSetting),
     ("Profile Apply is enabled only for a verified monitor-set difference", ProfileApplyRequiresVerifiedDifference),
     ("Form1 caps large monitor lists and reserves scrollbar width", Form1CapsLargeMonitorLists),
-    ("Form1 builds unique automatic layout backup paths", Form1BuildsUniqueAutomaticLayoutBackupPaths),
 };
 
 NativeDetectionTests.RunAll((name, body) => tests.Add((name, body)));
@@ -2314,14 +2313,12 @@ static void UpdaterArchivePathsAreContained()
         "Expected a reserved Windows device name to be rejected.");
 }
 
-static void UiSettingsDisablesAutomaticLayoutSavesByDefault()
+static void UiSettingsDisablesStartupProfileApplicationByDefault()
 {
     var settings = new UiSettings();
 
-    AssertFalse(settings.AutoSaveLayoutBeforeDisable,
-        "Expected automatic layout saves before disable to be off by default.");
     AssertFalse(settings.RestoreLayoutOnStartup,
-        "Expected startup layout restore to be off by default.");
+        "Expected startup profile application to be off by default.");
 }
 
 static void ProfileSetChangeConfirmationFollowsSetting()
@@ -2367,36 +2364,6 @@ static void Form1CapsLargeMonitorLists()
         verticalScrollbarWidth: 17);
     AssertEquals(437, large.Width, "Expected a large list to reserve vertical scrollbar width.");
     AssertEquals(900, large.Height, "Expected a large list to remain within the working area.");
-}
-
-static void Form1BuildsUniqueAutomaticLayoutBackupPaths()
-{
-    var dir = Path.Combine(Path.GetTempPath(), "MonitorSwitcher.Tests", Guid.NewGuid().ToString("N"));
-    Directory.CreateDirectory(dir);
-
-    try
-    {
-        var layoutPath = Path.Combine(dir, "monitor-layout.cfg");
-        var timestamp = new DateTime(2026, 7, 2, 21, 16, 22);
-
-        var first = Form1.NextAutoSaveBackupPath(layoutPath, timestamp);
-        AssertEquals(
-            layoutPath + ".autosave-20260702-211622.bak",
-            first,
-            "Expected first automatic backup path to use the timestamp.");
-
-        File.WriteAllText(first, "existing backup");
-        var second = Form1.NextAutoSaveBackupPath(layoutPath, timestamp);
-        AssertEquals(
-            layoutPath + ".autosave-20260702-211622-2.bak",
-            second,
-            "Expected backup path to avoid overwriting an existing backup.");
-    }
-    finally
-    {
-        if (Directory.Exists(dir))
-            Directory.Delete(dir, recursive: true);
-    }
 }
 
 static DetectedMonitor Monitor(

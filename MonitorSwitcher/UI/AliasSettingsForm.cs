@@ -50,7 +50,6 @@ namespace WorkMonitorSwitcher
         private readonly CheckBox _chkTray = new() { Text = "Minimize to tray", AutoSize = true };
         private readonly CheckBox _chkStartup = new() { Text = "Start with Windows", AutoSize = true };
         private readonly CheckBox _chkConfirmDisable = new() { Text = "Confirm before disabling", AutoSize = true };
-        private readonly CheckBox _chkAutoSaveLayout = new() { Text = "Auto-save layout before disabling", AutoSize = true };
         private readonly CheckBox _chkRestoreLayoutOnStartup = new() { Text = "Apply monitor profile on app start", AutoSize = true };
         private readonly Button _layoutProfileButton = new() { Text = "Default", AutoSize = false, Size = new Size(150, 26), TextAlign = ContentAlignment.MiddleLeft };
         private readonly Button _deleteProfile = new ThemedButton { Text = "Delete Profile", AutoSize = false, Size = new Size(96, 26), Tone = ThemedButtonTone.Danger };
@@ -87,7 +86,6 @@ namespace WorkMonitorSwitcher
         public bool? MinimizeToTrayResult { get; private set; }
         public bool? StartWithWindowsResult { get; private set; }
         public bool? ConfirmBeforeDisableResult { get; private set; }
-        public bool? AutoSaveLayoutBeforeDisableResult { get; private set; }
         public bool? RestoreLayoutOnStartupResult { get; private set; }
         public string? SelectedLayoutProfileResult { get; private set; }
         public HashSet<string> RemovedLayoutProfiles { get; } = new(StringComparer.OrdinalIgnoreCase);
@@ -99,7 +97,6 @@ namespace WorkMonitorSwitcher
             bool minimizeToTray,
             bool startWithWindows,
             bool confirmBeforeDisable,
-            bool autoSaveLayoutBeforeDisable,
             bool restoreLayoutOnStartup,
             List<string> layoutProfiles,
             string selectedLayoutProfile,
@@ -145,7 +142,6 @@ namespace WorkMonitorSwitcher
             _chkTray.Checked = minimizeToTray;
             _chkStartup.Checked = startWithWindows;
             _chkConfirmDisable.Checked = confirmBeforeDisable;
-            _chkAutoSaveLayout.Checked = autoSaveLayoutBeforeDisable;
             _chkRestoreLayoutOnStartup.Checked = restoreLayoutOnStartup;
             SetSelectedLayoutProfile(_selectedLayoutProfile);
             _grid.RowHeadersVisible = false;
@@ -305,7 +301,6 @@ namespace WorkMonitorSwitcher
             _toolTip.SetToolTip(_chkTray, "Close to the notification area instead of exiting.");
             _toolTip.SetToolTip(_chkStartup, "Start Monitor Switcher when you sign in to Windows.");
             _toolTip.SetToolTip(_chkConfirmDisable, "Ask before disabling a monitor directly or by applying a layout profile.");
-            _toolTip.SetToolTip(_chkAutoSaveLayout, "Overwrite the selected layout profile before disabling a monitor. A backup is kept first.");
             _toolTip.SetToolTip(_chkRestoreLayoutOnStartup, "Apply only the selected profile's enabled monitor set when Monitor Switcher starts. Windows keeps position and orientation.");
             _toolTip.SetToolTip(_layoutProfileButton, "Current layout profile used by the main window.");
             _toolTip.SetToolTip(_deleteProfile, "Delete the selected saved layout profile. Default cannot be deleted.");
@@ -313,53 +308,6 @@ namespace WorkMonitorSwitcher
             _toolTip.SetToolTip(_openRegistry, "Open Registry Editor at the selected monitor key.");
             _toolTip.SetToolTip(_updateApp, "Download the latest GitHub release asset if one is published.");
             _toolTip.SetToolTip(_showDiagnostics, "Show recent monitor action and layout profile events.");
-
-            // Top bar
-            var topBar = new FlowLayoutPanel
-            {
-                Dock = DockStyle.Top,
-                Height = 44,
-                FlowDirection = FlowDirection.LeftToRight,
-                Padding = new Padding(12, 10, 12, 6),
-                AutoSize = false,
-                WrapContents = false,
-                AutoScroll = true
-            };
-            _chkDark.Margin = new Padding(0, 3, 18, 3);
-            _chkTopMost.Margin = new Padding(0, 3, 18, 3);
-            _chkTray.Margin = new Padding(0, 3, 18, 3);
-            _chkStartup.Margin = new Padding(0, 3, 18, 3);
-            _chkConfirmDisable.Margin = new Padding(0, 3, 18, 3);
-            _chkAutoSaveLayout.Margin = new Padding(0, 3, 18, 3);
-            _chkRestoreLayoutOnStartup.Margin = new Padding(0, 3, 18, 3);
-            topBar.Controls.Add(_chkDark);
-            topBar.Controls.Add(_chkTopMost);
-            topBar.Controls.Add(_chkTray);
-            topBar.Controls.Add(_chkStartup);
-            topBar.Controls.Add(_chkConfirmDisable);
-            topBar.Controls.Add(_chkAutoSaveLayout);
-            topBar.Controls.Add(_chkRestoreLayoutOnStartup);
-
-            var profileBar = new FlowLayoutPanel
-            {
-                Dock = DockStyle.Bottom,
-                Height = 42,
-                FlowDirection = FlowDirection.LeftToRight,
-                WrapContents = false,
-                Padding = new Padding(12, 7, 12, 5),
-                AutoScroll = true
-            };
-            var profileLabel = new Label
-            {
-                Text = "Layout profile",
-                AutoSize = true,
-                Margin = new Padding(0, 5, 8, 0)
-            };
-            _layoutProfileButton.Margin = new Padding(0, 0, 8, 0);
-            _deleteProfile.Margin = new Padding(0, 0, 8, 0);
-            profileBar.Controls.Add(profileLabel);
-            profileBar.Controls.Add(_layoutProfileButton);
-            profileBar.Controls.Add(_deleteProfile);
 
             var bottom = new TableLayoutPanel
             {
@@ -372,14 +320,6 @@ namespace WorkMonitorSwitcher
             bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             bottom.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 
-            var toolActions = new FlowLayoutPanel
-            {
-                Dock = DockStyle.Fill,
-                FlowDirection = FlowDirection.LeftToRight,
-                WrapContents = false,
-                AutoSize = true,
-                AutoScroll = true
-            };
             var commitActions = new FlowLayoutPanel
             {
                 Dock = DockStyle.Fill,
@@ -391,32 +331,144 @@ namespace WorkMonitorSwitcher
             foreach (var button in new[] { _openRegistry, _updateApp, _showDiagnostics, _remove, _cancel, _ok })
                 button.Margin = new Padding(0, 0, 8, 0);
 
-            toolActions.Controls.Add(_openRegistry);
-            toolActions.Controls.Add(_updateApp);
-            toolActions.Controls.Add(_showDiagnostics);
             commitActions.Controls.Add(_ok);
             commitActions.Controls.Add(_cancel);
-            commitActions.Controls.Add(_remove);
-            bottom.Controls.Add(toolActions, 0, 0);
             bottom.Controls.Add(commitActions, 1, 0);
+
+            var tabs = new TabControl
+            {
+                Dock = DockStyle.Fill,
+                Padding = new Point(16, 6)
+            };
+            var generalPage = new TabPage("General") { Padding = new Padding(14) };
+            var monitorsPage = new TabPage("Monitors") { Padding = new Padding(8) };
+            var profilesPage = new TabPage("Profiles") { Padding = new Padding(16) };
+            tabs.TabPages.Add(generalPage);
+            tabs.TabPages.Add(monitorsPage);
+            tabs.TabPages.Add(profilesPage);
+
+            var generalLayout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 2,
+                RowCount = 2,
+                Padding = new Padding(4)
+            };
+            generalLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            generalLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            generalLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            generalLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 92));
+
+            var appearanceGroup = new GroupBox
+            {
+                Text = "Appearance and window",
+                Dock = DockStyle.Fill,
+                Padding = new Padding(14, 20, 14, 12),
+                Margin = new Padding(0, 0, 7, 10)
+            };
+            var appearanceOptions = CreateVerticalOptionsPanel(_chkDark, _chkTopMost, _chkTray);
+            appearanceGroup.Controls.Add(appearanceOptions);
+
+            var behaviourGroup = new GroupBox
+            {
+                Text = "Behaviour",
+                Dock = DockStyle.Fill,
+                Padding = new Padding(14, 20, 14, 12),
+                Margin = new Padding(7, 0, 0, 10)
+            };
+            var behaviourOptions = CreateVerticalOptionsPanel(
+                _chkStartup,
+                _chkConfirmDisable,
+                _chkRestoreLayoutOnStartup);
+            behaviourGroup.Controls.Add(behaviourOptions);
+
+            var maintenanceGroup = new GroupBox
+            {
+                Text = "Application",
+                Dock = DockStyle.Fill,
+                Padding = new Padding(14, 20, 14, 10),
+                Margin = new Padding(0)
+            };
+            var maintenanceActions = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false
+            };
+            maintenanceActions.Controls.Add(_updateApp);
+            maintenanceActions.Controls.Add(_showDiagnostics);
+            maintenanceGroup.Controls.Add(maintenanceActions);
+
+            generalLayout.Controls.Add(appearanceGroup, 0, 0);
+            generalLayout.Controls.Add(behaviourGroup, 1, 0);
+            generalLayout.Controls.Add(maintenanceGroup, 0, 1);
+            generalLayout.SetColumnSpan(maintenanceGroup, 2);
+            generalPage.Controls.Add(generalLayout);
 
             var monitorLayout = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
                 ColumnCount = 2,
-                RowCount = 1,
-                Padding = new Padding(8, 8, 8, 0)
+                RowCount = 2
             };
             monitorLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 72));
             monitorLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 28));
+            monitorLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            monitorLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
             monitorLayout.Controls.Add(_grid, 0, 0);
             monitorLayout.Controls.Add(_details, 1, 0);
+            var monitorActions = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false,
+                Padding = new Padding(0, 8, 0, 0)
+            };
+            monitorActions.Controls.Add(_openRegistry);
+            monitorActions.Controls.Add(_remove);
+            monitorLayout.Controls.Add(monitorActions, 0, 1);
+            monitorLayout.SetColumnSpan(monitorActions, 2);
+            monitorsPage.Controls.Add(monitorLayout);
 
-            Controls.Add(monitorLayout);
-            Controls.Add(topBar);
-            Controls.Add(profileBar);
+            var profileGroup = new GroupBox
+            {
+                Text = "Saved monitor profiles",
+                Dock = DockStyle.Top,
+                Height = 118,
+                Padding = new Padding(14, 22, 14, 12)
+            };
+            var profileDescription = new Label
+            {
+                Text = "Choose the profile used by the main window. Changes are applied when you save these settings.",
+                Dock = DockStyle.Top,
+                AutoSize = false,
+                Height = 30
+            };
+            var profileActions = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Bottom,
+                Height = 40,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false
+            };
+            var profileLabel = new Label
+            {
+                Text = "Selected profile",
+                AutoSize = true,
+                Margin = new Padding(0, 5, 8, 0)
+            };
+            _layoutProfileButton.Margin = new Padding(0, 0, 8, 0);
+            _deleteProfile.Margin = new Padding(0, 0, 8, 0);
+            profileActions.Controls.Add(profileLabel);
+            profileActions.Controls.Add(_layoutProfileButton);
+            profileActions.Controls.Add(_deleteProfile);
+            profileGroup.Controls.Add(profileDescription);
+            profileGroup.Controls.Add(profileActions);
+            profilesPage.Controls.Add(profileGroup);
+
+            Controls.Add(tabs);
             Controls.Add(bottom);
-            FitInitialSizeToContent(topBar, profileBar, toolActions, commitActions, sizingOwner);
+            FitInitialSizeToContent(monitorActions, commitActions, sizingOwner);
             UpdatePrimaryFallbackCellStates();
 
             AcceptButton = _ok;
@@ -442,7 +494,6 @@ namespace WorkMonitorSwitcher
                 MinimizeToTrayResult = _chkTray.Checked;
                 StartWithWindowsResult = _chkStartup.Checked;
                 ConfirmBeforeDisableResult = _chkConfirmDisable.Checked;
-                AutoSaveLayoutBeforeDisableResult = _chkAutoSaveLayout.Checked;
                 RestoreLayoutOnStartupResult = _chkRestoreLayoutOnStartup.Checked;
                 SelectedLayoutProfileResult = _selectedLayoutProfile;
                 DialogResult = DialogResult.OK;
@@ -452,10 +503,27 @@ namespace WorkMonitorSwitcher
             UpdateDetailsPanel();
         }
 
+        private static FlowLayoutPanel CreateVerticalOptionsPanel(params CheckBox[] options)
+        {
+            var panel = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                FlowDirection = FlowDirection.TopDown,
+                WrapContents = false,
+                AutoScroll = true
+            };
+
+            foreach (var option in options)
+            {
+                option.Margin = new Padding(0, 5, 0, 8);
+                panel.Controls.Add(option);
+            }
+
+            return panel;
+        }
+
         private void FitInitialSizeToContent(
-            FlowLayoutPanel topBar,
-            FlowLayoutPanel profileBar,
-            FlowLayoutPanel toolActions,
+            FlowLayoutPanel monitorActions,
             FlowLayoutPanel commitActions,
             Form? sizingOwner)
         {
@@ -466,22 +534,20 @@ namespace WorkMonitorSwitcher
                 16;
 
             int monitorAreaWidth = gridMinWidth + _details.MinimumSize.Width + 44;
-            int topBarWidth = topBar.Padding.Horizontal + PreferredControlsWidth(topBar.Controls) + 24;
-            int profileBarWidth = profileBar.Padding.Horizontal + PreferredControlsWidth(profileBar.Controls) + 24;
             int bottomWidth =
-                PreferredControlsWidth(toolActions.Controls) +
+                PreferredControlsWidth(monitorActions.Controls) +
                 PreferredControlsWidth(commitActions.Controls) +
                 72;
 
             int desiredClientWidth = Math.Max(
                 1120,
-                Math.Max(monitorAreaWidth, Math.Max(topBarWidth, Math.Max(profileBarWidth, bottomWidth))));
+                Math.Max(monitorAreaWidth, bottomWidth));
 
             int visibleRows = Math.Min(Math.Max(_rows.Count, 5), 9);
             int desiredGridHeight = _grid.ColumnHeadersHeight + (visibleRows * _grid.RowTemplate.Height) + 76;
             int desiredClientHeight = Math.Max(
                 640,
-                topBar.Height + profileBar.Height + 54 + desiredGridHeight + 32);
+                54 + desiredGridHeight + 78);
 
             var screen = sizingOwner != null && !sizingOwner.IsDisposed
                 ? Screen.FromControl(sizingOwner)

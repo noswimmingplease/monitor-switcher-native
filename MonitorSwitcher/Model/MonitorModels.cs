@@ -15,7 +15,6 @@ namespace WorkMonitorSwitcher.Model
         public bool MinimizeToTray { get; set; }
         public bool StartWithWindows { get; set; }
         public bool ConfirmBeforeDisable { get; set; } = true;
-        public bool AutoSaveLayoutBeforeDisable { get; set; }
         public bool RestoreLayoutOnStartup { get; set; }
         public string SelectedLayoutProfile { get; set; } = "Default";
 
