@@ -410,18 +410,17 @@ namespace WorkMonitorSwitcher
             {
                 Dock = DockStyle.Top,
                 ColumnCount = 1,
-                RowCount = 3
+                RowCount = 2
             };
             int visibleMonitorRows = CalculateVisibleMonitorRows(_rows.Count);
             int monitorGridHeight = _grid.ColumnHeadersHeight + (visibleMonitorRows * _grid.RowTemplate.Height) + 4;
             int monitorDetailsHeight = 170;
-            monitorLayout.Height = monitorGridHeight + monitorDetailsHeight + 44;
+            monitorLayout.Height = monitorGridHeight + monitorDetailsHeight;
             monitorLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             var monitorGridRow = new RowStyle(SizeType.Absolute, monitorGridHeight);
             var monitorDetailsRow = new RowStyle(SizeType.Absolute, monitorDetailsHeight);
             monitorLayout.RowStyles.Add(monitorGridRow);
             monitorLayout.RowStyles.Add(monitorDetailsRow);
-            monitorLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
             monitorLayout.Controls.Add(_grid, 0, 0);
 
             var detailsGroup = new GroupBox
@@ -439,12 +438,12 @@ namespace WorkMonitorSwitcher
                 Dock = DockStyle.Fill,
                 FlowDirection = FlowDirection.LeftToRight,
                 WrapContents = false,
-                Padding = new Padding(0, 8, 0, 0)
+                AutoSize = true
             };
             monitorActions.Controls.Add(_openRegistry);
             monitorActions.Controls.Add(_remove);
-            monitorLayout.Controls.Add(monitorActions, 0, 2);
             monitorsPage.Controls.Add(monitorLayout);
+            bottom.Controls.Add(monitorActions, 0, 0);
 
             var profileGroup = new GroupBox
             {
@@ -509,14 +508,14 @@ namespace WorkMonitorSwitcher
 
                     monitorGridRow.Height = gridHeight;
                     monitorDetailsRow.Height = detailsHeight;
-                    monitorLayout.Height = gridHeight + detailsHeight + 44;
+                    monitorLayout.Height = gridHeight + detailsHeight;
                     _grid.ScrollBars = _rows.Count > 8
                         ? ScrollBars.Vertical
                         : ScrollBars.None;
 
                     if (resizeWindow && monitorsPage.Visible)
                     {
-                        int desiredClientHeight = 46 + bottom.Height + monitorsPage.Padding.Vertical + monitorLayout.Height + 12;
+                        int desiredClientHeight = 46 + bottom.Height + monitorsPage.Padding.Vertical + monitorLayout.Height;
                         int maxClientHeight = Math.Max(300, Screen.FromControl(this).WorkingArea.Height - 80);
                         ClientSize = new Size(ClientSize.Width, Math.Min(desiredClientHeight, maxClientHeight));
                     }
@@ -557,6 +556,7 @@ namespace WorkMonitorSwitcher
                 generalPage.Visible = ReferenceEquals(page, generalPage);
                 monitorsPage.Visible = ReferenceEquals(page, monitorsPage);
                 profilesPage.Visible = ReferenceEquals(page, profilesPage);
+                monitorActions.Visible = ReferenceEquals(page, monitorsPage);
                 page.BringToFront();
 
                 var palette = _chkDark.Checked ? ThemePalette.Dark() : ThemePalette.Light();
@@ -578,7 +578,7 @@ namespace WorkMonitorSwitcher
                         : ReferenceEquals(page, monitorsPage)
                             ? monitorLayout.Height
                             : Math.Max(profileGroup.Height, profileGroup.PreferredSize.Height);
-                    int desiredClientHeight = 46 + bottom.Height + page.Padding.Vertical + contentHeight + 12;
+                    int desiredClientHeight = 46 + bottom.Height + page.Padding.Vertical + contentHeight;
                     int maxClientHeight = Math.Max(300, Screen.FromControl(this).WorkingArea.Height - 80);
                     ClientSize = new Size(ClientSize.Width, Math.Min(desiredClientHeight, maxClientHeight));
                 }
@@ -728,7 +728,7 @@ namespace WorkMonitorSwitcher
 
             var minimumClientSize = new Size(
                 Math.Min(760, maxClientWidth),
-                Math.Min(300, maxClientHeight));
+                Math.Min(240, maxClientHeight));
 
             MinimumSize = SizeFromClientSize(minimumClientSize);
             ClientSize = desiredClientSize;
