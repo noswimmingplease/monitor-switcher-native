@@ -1332,20 +1332,28 @@ namespace WorkMonitorSwitcher
             if (string.IsNullOrWhiteSpace(result.PackageDirectory))
                 throw new InvalidOperationException("The verified update folder was not returned.");
 
-            string availability = result.Status == AppUpdateStatus.Reused
-                ? $"A previously downloaded copy of MonitorSwitcher {result.ReleaseVersion} was verified again."
-                : $"MonitorSwitcher {result.ReleaseVersion} was downloaded, verified and extracted.";
             var openChoice = MessageBox.Show(
                 this,
-                $"{availability}\n\n" +
-                "The running installation and its Start or startup shortcuts were not changed. " +
-                "Run MonitorSwitcher.exe from the folder below to test the release.\n\n" +
-                $"Extracted release:\n{result.PackageDirectory}\n\nOpen the folder now?",
+                BuildDownloadedUpdateMessage(result),
                 "Check for Updates",
                 MessageBoxButtons.YesNo,
                 MessageBoxIcon.Information);
             if (openChoice == DialogResult.Yes)
                 OpenExplorerAt(result.PackageDirectory);
+        }
+
+        internal static string BuildDownloadedUpdateMessage(AppUpdateResult result)
+        {
+            string availability = result.Status == AppUpdateStatus.Reused
+                ? $"A previously downloaded copy of MonitorSwitcher {result.ReleaseVersion} was verified again."
+                : $"MonitorSwitcher {result.ReleaseVersion} was downloaded, verified and extracted.";
+            return $"{availability}\n\n" +
+                   "The checksum confirms that these files match the published GitHub release, but the executable " +
+                   "is not Authenticode-signed and has no verified publisher identity. Windows Defender SmartScreen " +
+                   "may show an unrecognised-app warning.\n\n" +
+                   "The running installation and its Start or startup shortcuts were not changed. " +
+                   "Run MonitorSwitcher.exe from the folder below to test the release.\n\n" +
+                   $"Extracted release:\n{result.PackageDirectory}\n\nOpen the folder now?";
         }
 
         private static string GetCurrentInformationalVersion()

@@ -29,6 +29,7 @@ internal static class UpdaterTests
         yield return ("Updater rejects rewritten cache metadata and tampered extracted files", TamperedCachedPackageIsRejected);
         yield return ("Updater reports temporary-directory cleanup failures", CleanupFailureIsReported);
         yield return ("Updater byte limits use accurate binary units", ByteLimitsUseBinaryUnits);
+        yield return ("Updater explains unsigned release trust before opening a download", DownloadedUpdateExplainsUnsignedTrust);
         yield return ("Settings preserves hidden preferred-primary metadata", SettingsPreservesPreferredPrimary);
     }
 
@@ -443,6 +444,15 @@ internal static class UpdaterTests
         Equal("512 B", AppUpdateService.FormatByteLimit(512), "Expected byte-scale limits to remain visible.");
         Equal("16 KiB", AppUpdateService.FormatByteLimit(16 * 1024), "Expected the checksum limit not to display as 0 MB.");
         Equal("1.5 MiB", AppUpdateService.FormatByteLimit(3 * 1024 * 1024 / 2), "Expected fractional MiB formatting.");
+    }
+
+    private static void DownloadedUpdateExplainsUnsignedTrust()
+    {
+        string message = AliasSettingsForm.BuildDownloadedUpdateMessage(
+            AppUpdateResult.Ready("0.4.0", @"C:\Updates\MonitorSwitcher-v0.4.0"));
+        Contains(message, "not Authenticode-signed", "Expected the updater to disclose the missing signature.");
+        Contains(message, "no verified publisher identity", "Expected the updater to explain the checksum trust boundary.");
+        Contains(message, "SmartScreen", "Expected the updater to warn about the likely Windows prompt.");
     }
 
     private static void SettingsPreservesPreferredPrimary()

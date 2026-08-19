@@ -267,10 +267,17 @@ jobs:
           if ($runtimePackLibraries.Count -ne 1) {
             throw 'Published dependency metadata does not identify exactly one x64 .NET runtime pack.'
           }
+          $windowsDesktopPackLibraries = @($deps.libraries.PSObject.Properties |
+            Where-Object { $_.Name -like 'runtimepack.Microsoft.WindowsDesktop.App.Runtime.win-x64/*' })
+          if ($windowsDesktopPackLibraries.Count -ne 1) {
+            throw 'Published dependency metadata does not identify exactly one x64 Windows Desktop runtime pack.'
+          }
           $runtimePackVersion = $runtimePackLibraries[0].Name.Split('/', 2)[1]
+          $windowsDesktopPackVersion = $windowsDesktopPackLibraries[0].Name.Split('/', 2)[1]
           $reviewedRuntimePackVersion = '8.0.30'
-          if ($runtimePackVersion -ne $reviewedRuntimePackVersion) {
-            throw "The resolved .NET runtime pack changed from $reviewedRuntimePackVersion to $runtimePackVersion. Refresh the tracked runtime notice and provenance before releasing."
+          if ($runtimePackVersion -ne $reviewedRuntimePackVersion -or
+              $windowsDesktopPackVersion -ne $reviewedRuntimePackVersion) {
+            throw "The resolved runtime packs changed from $reviewedRuntimePackVersion (Core=$runtimePackVersion, WindowsDesktop=$windowsDesktopPackVersion). Refresh the tracked runtime notices and provenance before releasing."
           }
 
           $globalPackagesDir = if ([string]::IsNullOrWhiteSpace($env:NUGET_PACKAGES)) {
@@ -291,6 +298,17 @@ jobs:
           $publishedNoticeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $publishedRuntimeNotice).Hash
           if ($trackedNoticeHash -ne $resolvedNoticeHash -or $publishedNoticeHash -ne $resolvedNoticeHash) {
             throw 'The tracked or published .NET runtime notice does not match the resolved runtime pack.'
+          }
+
+          $resolvedDesktopLicense = Join-Path $globalPackagesDir (
+            "microsoft.windowsdesktop.app.runtime.win-x64\$windowsDesktopPackVersion\LICENSE")
+          if (-not (Test-Path -LiteralPath $resolvedDesktopLicense -PathType Leaf)) {
+            throw "The resolved Windows Desktop runtime licence was not found at $resolvedDesktopLicense."
+          }
+          $expectedDesktopLicenseHash = 'A89886665765362EB77E0F8E26602C924520041D1711B2EEDC136434FE4D01AB'
+          $desktopLicenseHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $resolvedDesktopLicense).Hash
+          if ($desktopLicenseHash -ne $expectedDesktopLicenseHash) {
+            throw 'The Windows Desktop runtime licence changed. Refresh the documented provenance before releasing.'
           }
 
           $unexpectedExecutables = @(Get-ChildItem -LiteralPath $publishDir -Recurse -File -Filter '*.exe' |
@@ -435,11 +453,58 @@ jobs:
             gh release create $env:RELEASE_TAG `
               --draft `
               --verify-tag `
-              --title $env:RELEASE_TAG `
+              --title "Monitor Switcher $env:RELEASE_TAG" `
               --generate-notes `
               --repo $env:GH_REPO
             if ($LASTEXITCODE -ne 0) {
               throw "Unable to create draft release $env:RELEASE_TAG."
+            }
+          }
+
+          $smartScreenHeading = '## Windows SmartScreen notice'
+          $releaseDescription = gh release view $env:RELEASE_TAG --repo $env:GH_REPO --json body |
+            ConvertFrom-Json
+          $currentBody = if ($null -eq $releaseDescription.body) {
+            ''
+          } else {
+            [string]$releaseDescription.body
+          }
+          if (-not $currentBody.Contains(
+              $smartScreenHeading,
+              [System.StringComparison]::Ordinal)) {
+            $releasePreamble = @(
+              '## Before upgrading',
+              '',
+              'Profiles created by the earlier external-tool version must be saved once with this release before they can enable a disabled monitor. Profiles control which monitors are enabled; Windows Display Settings remains authoritative for position, orientation, resolution and the primary display.',
+              '',
+              '## Download',
+              '',
+              "Download ``$env:ZIP_NAME`` and verify it against the attached ``$env:CHECKSUM_NAME`` before extracting it.",
+              '',
+              $smartScreenHeading,
+              '',
+              'This release is not Authenticode-signed. Windows Defender SmartScreen is therefore likely to show **Windows protected your PC**, **Unknown publisher**, or an unrecognised-app warning for a new download.',
+              '',
+              "Download only from this repository and verify ``$env:ZIP_NAME`` against ``$env:CHECKSUM_NAME``. After successful verification, a standard unmanaged Windows installation normally allows **More info** -> **Run anyway**. Smart App Control or an organisation's policy may block unsigned applications without offering that option.",
+              '',
+              "[Read Microsoft's SmartScreen guidance](https://learn.microsoft.com/windows/apps/package-and-deploy/smartscreen-reputation)."
+            ) -join [System.Environment]::NewLine
+            $updatedBody = if ([string]::IsNullOrWhiteSpace($currentBody)) {
+              $releasePreamble
+            } else {
+              $releasePreamble +
+                [System.Environment]::NewLine +
+                [System.Environment]::NewLine +
+                $currentBody
+            }
+            $notesPath = Join-Path $env:RUNNER_TEMP 'monitor-switcher-release-notes.md'
+            [System.IO.File]::WriteAllText(
+              $notesPath,
+              $updatedBody,
+              [System.Text.UTF8Encoding]::new($false))
+            gh release edit $env:RELEASE_TAG --notes-file $notesPath --repo $env:GH_REPO
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Unable to add the Windows SmartScreen notice. The release remains a draft.'
             }
           }
 

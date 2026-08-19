@@ -2,7 +2,28 @@
 
 Open-source Windows Forms utility for switching monitor profiles without a separate helper application.
 
+[![CI](https://github.com/Ci303/monitor-switcher-native/actions/workflows/ci.yml/badge.svg)](https://github.com/Ci303/monitor-switcher-native/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/Ci303/monitor-switcher-native?label=release)](https://github.com/Ci303/monitor-switcher-native/releases/latest)
+[![Licence: GPL-3.0](https://img.shields.io/github/license/Ci303/monitor-switcher-native)](LICENSE)
+
 Source repository: https://github.com/Ci303/monitor-switcher-native
+
+## Download and Run
+
+Download the self-contained Windows x64 ZIP and its `.sha256` file from the [latest release](https://github.com/Ci303/monitor-switcher-native/releases/latest). Verify the archive before extracting it:
+
+```powershell
+$zip = '.\MonitorSwitcher-v0.4.0-win-x64.zip'
+$expected = ((Get-Content -LiteralPath "$zip.sha256" -Raw).Trim() -split '\s+')[0]
+$actual = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actual -ne $expected) { throw 'The downloaded ZIP does not match its published checksum.' }
+Expand-Archive -LiteralPath $zip -DestinationPath '.\MonitorSwitcher'
+```
+
+Run `MonitorSwitcher.exe` from the extracted folder. There is currently no installer; updating does not replace an existing copy or retarget its shortcuts automatically.
+
+> [!IMPORTANT]
+> Release executables are not Authenticode-signed. Windows Defender SmartScreen is therefore likely to show **Windows protected your PC**, **Unknown publisher**, or an unrecognised-app warning for a new download. Download only from this repository and verify the ZIP against its attached `.sha256` file. After successful verification, a standard unmanaged Windows installation normally allows **More info** → **Run anyway**. Smart App Control or an organisation's policy may block unsigned applications without offering that option. See [Microsoft's SmartScreen guidance](https://learn.microsoft.com/windows/apps/package-and-deploy/smartscreen-reputation).
 
 ## What It Does
 
@@ -18,7 +39,7 @@ Monitor Switcher does not download, install or execute a third-party monitor uti
 
 ## Requirements
 
-- Windows 10 or Windows 11
+- 64-bit Windows 10 or Windows 11
 - GitHub release zip: no separate .NET installation required
 - Local development: .NET 8 SDK
 
@@ -57,6 +78,12 @@ When **Confirm before disabling** is enabled, applying a profile that changes th
 Profiles created by the previous external-tool version must be saved once with this version before they can enable a disabled monitor, because native CCD route identities are required. Legacy files are not migrated at start-up. An explicit **Save** upgrades the selected profile transactionally.
 
 Enable both **Start with Windows** and **Apply monitor profile on app start** if the selected enabled-monitor set should be applied shortly after sign-in. Position and orientation are still taken from Windows, not from the profile.
+
+## Privacy
+
+Monitor Switcher has no telemetry or analytics. Profiles, aliases, settings and diagnostics remain on the local computer. **Check for Updates** contacts GitHub only when the user selects it.
+
+Monitor identity data can include EDID serial numbers, Windows device-instance identifiers and registry paths. Redact those values before sharing diagnostics or screenshots publicly.
 
 ## Storage
 
@@ -99,9 +126,9 @@ CI builds the full solution and runs this command for every push and pull reques
 
 ## Releases
 
-GitHub releases are self-contained Windows x64 zip archives. Tagged `vX.Y.Z` builds use `X.Y.Z` in the application metadata and retain the tag in the archive name. There is currently no installer: extract the zip to a folder and run `MonitorSwitcher.exe`. **Check for Updates** automates the download, verification and extraction stages only.
+GitHub releases are self-contained Windows x64 ZIP archives. Tagged `vX.Y.Z` builds use `X.Y.Z` in the application metadata and retain the tag in the archive name. See [Download and Run](#download-and-run) for checksum verification and the expected SmartScreen warning. **Check for Updates** automates the download, verification and extraction stages only.
 
-Release executables are not currently Authenticode-signed, so Windows may show an **Unknown publisher** or SmartScreen reputation prompt. Code signing requires a separately protected publisher certificate and is planned as release infrastructure rather than being simulated in the application.
+Code signing requires a separately protected publisher certificate and is planned as release infrastructure rather than being simulated in the application.
 
 Release automation builds and tests the tag before creating a draft release. It attaches and verifies both assets while the release is still a draft, then publishes it as the final operation. An already-public release is never overwritten, which keeps the workflow compatible with immutable GitHub releases.
 

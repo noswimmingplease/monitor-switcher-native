@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.4.0 - 2026-08-19
+
 ### Fixed
 
 - Replaced the external monitor-control backend with direct Windows CCD detection and topology application; no separate monitor utility is required.
@@ -40,6 +42,7 @@
 - Release automation now builds and tests tagged code before attaching assets to a draft; publishing is the final step and public release assets are never replaced.
 - Improved Settings keyboard navigation, accessible section state, high-DPI action wrapping and working-area clamping.
 - Simplified the selected-profile status to **Current profile** or **Click Apply to use this profile**, while retaining the detailed monitor changes in tooltips and confirmations.
+- The in-app update result now explains that checksum verification does not provide a signed publisher identity and warns about the likely Windows SmartScreen prompt.
 
 ## v0.3.9 - 2026-07-06
 
