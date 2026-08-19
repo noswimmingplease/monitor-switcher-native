@@ -52,6 +52,25 @@ namespace WorkMonitorSwitcher.Services
             }
         }
 
+        public PersistenceResult ClearWithResult()
+        {
+            lock (_sync)
+            {
+                try
+                {
+                    if (!File.Exists(_path))
+                        return PersistenceResult.Unchanged();
+
+                    File.Delete(_path);
+                    return PersistenceResult.Saved();
+                }
+                catch (Exception ex)
+                {
+                    return PersistenceResult.Failed(ex.Message);
+                }
+            }
+        }
+
         private void Trim()
         {
             var lines = File.ReadLines(_path).TakeLast(MaxLines).ToList();

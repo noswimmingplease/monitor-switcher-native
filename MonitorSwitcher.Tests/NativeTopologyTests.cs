@@ -14,6 +14,38 @@ internal static class NativeTopologyTests
         yield return ("Native exact restore selects a unique non-clone route assignment", ExactRouteSelectionIsUnique);
         yield return ("Native topology flags separate database lookup from persistent best mode", NativeFlagsAreCorrect);
         yield return ("Native topology mutation rejects stale display-name bindings", StaleDetectionBindingFailsClosed);
+        yield return ("Monitor profiles reduce to physical membership regardless of saved geometry", ProfileApplicationIgnoresGeometry);
+    }
+
+    private static void ProfileApplicationIgnoresGeometry()
+    {
+        var targetA = Target("A");
+        var targetB = Target("B");
+        var first = new NativeDisplayProfile(1, new[]
+        {
+            Monitor(@"\\.\DISPLAY1", targetA, 1, 0, 1, 1, 0, 0, 1920, 1080, 1, true),
+            Monitor(@"\\.\DISPLAY2", targetB, 1, 1, 1, 2, 1920, 0, 2560, 1440, 1, false)
+        });
+        var rearranged = new NativeDisplayProfile(1, new[]
+        {
+            Monitor(@"\\.\DISPLAY8", targetA, 1, 3, 1, 1, 4000, -900, 1080, 1920, 4, false),
+            Monitor(@"\\.\DISPLAY7", targetB, 1, 2, 1, 2, 0, 0, 3840, 2160, 2, true)
+        });
+        var firstResolution = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            [@"\\.\DISPLAY1"] = targetA,
+            [@"\\.\DISPLAY2"] = targetB
+        };
+        var rearrangedResolution = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            [@"\\.\DISPLAY8"] = targetA,
+            [@"\\.\DISPLAY7"] = targetB
+        };
+
+        var firstSet = DisplayTopologyService.GetProfileMonitorSet(first, firstResolution);
+        var rearrangedSet = DisplayTopologyService.GetProfileMonitorSet(rearranged, rearrangedResolution);
+        AssertTrue(firstSet.SetEquals(rearrangedSet),
+            "Position, resolution, rotation, primary state and DISPLAY numbering must not change profile membership.");
     }
 
     private static void StaleDetectionBindingFailsClosed()

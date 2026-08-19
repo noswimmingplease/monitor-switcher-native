@@ -15,7 +15,6 @@ namespace WorkMonitorSwitcher.Model
         public bool MinimizeToTray { get; set; }
         public bool StartWithWindows { get; set; }
         public bool ConfirmBeforeDisable { get; set; } = true;
-        public bool AutoSaveLayoutBeforeDisable { get; set; }
         public bool RestoreLayoutOnStartup { get; set; }
         public string SelectedLayoutProfile { get; set; } = "Default";
 
@@ -32,6 +31,7 @@ namespace WorkMonitorSwitcher.Model
         public string? LastSerialNumber { get; set; }      // Last seen EDID serial
         public string? LastInstanceId { get; set; }        // Last seen PnP instance id
         public string? LastMonitorId { get; set; }         // Last seen EDID model/product
+        public string? LastNativeTargetPath { get; set; }  // Last seen CCD physical target path
 
         // Optional UI hints
         public int? PreferredOrder { get; set; }           // Optional pin for row ordering
@@ -55,6 +55,7 @@ namespace WorkMonitorSwitcher.Model
         public string DeviceName { get; set; } = string.Empty;  // \\.\DISPLAYn
         public string NativeTargetPath { get; set; } = string.Empty; // CCD monitor device-interface path
         public string MonitorKey { get; set; } = string.Empty;  // Registry path if available
+        public string DriverRegistryKey { get; set; } = string.Empty; // Current PnP driver software key
         public string MonitorId { get; set; } = string.Empty;   // EDID model/product
         public string InstanceId { get; set; } = string.Empty;  // PnP instance path
         public string SerialNumber { get; set; } = string.Empty;// EDID serial

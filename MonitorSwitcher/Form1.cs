@@ -3,7 +3,6 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
-using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -41,11 +40,15 @@ namespace WorkMonitorSwitcher
 
         // In-memory state
         private UiSettings _uiSettings;
-        private bool _startupEnabledForCurrentExecutable;
+        private StartupRegistrationState _startupRegistrationState;
         private bool _profileTransactionsHealthy = true;
+        private bool _topologyActionsQuarantined;
+        private string _topologyQuarantineReason = string.Empty;
         private readonly Dictionary<string, MonitorInfo> _aliasMap = new(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, MonitorControls> _controlsByKey = new(StringComparer.OrdinalIgnoreCase);
         private readonly List<Control> _dynamicControls = new();
+        private readonly List<string> _monitorCardOrder = new();
+        private readonly List<string> _monitorCardOrderBeforeDrag = new();
         private List<DetectedMonitor> _detected = new();
         private string _lastDetectionLogSignature = string.Empty;
         private bool _displayedDetectionUsedScreenFallback;
@@ -65,30 +68,45 @@ namespace WorkMonitorSwitcher
 
         // Debounced refresh on display changes
         private readonly System.Windows.Forms.Timer _refreshTimer = new() { Interval = 800 };
+        private readonly System.Windows.Forms.Timer _monitorCardAnimationTimer = new() { Interval = 15 };
+        private string? _draggedMonitorKey;
+        private Control? _monitorCardDragCapture;
+        private Point _monitorCardDragStartScreen;
+        private Point _monitorCardLastPointerScreen;
+        private int _monitorCardDragPointerOffsetY;
+        private bool _monitorCardDragActive;
+        private bool _endingMonitorCardDrag;
 
         // ---- Layout constants / handles ----
-        private const int SideMargin = 14;
-        private const int ControlGapX = 10;
-        private const int ButtonWidth = 108;
-        private const int ButtonHeight = 30;
-        private const int RowPanelWidth = 390;
-        private const int RowPanelHeight = 82;
-        private const int RowVerticalGap = 92;
-        private const int TopButtonsY = 12;
-        private const int FirstRowY = 68; // fallback start if no HR yet
+        private int SideMargin => ScaleLogical(14);
+        private int ControlGapX => ScaleLogical(10);
+        private int ButtonWidth => ScaleLogical(108);
+        private int ButtonHeight => ScaleLogical(30);
+        private int RowPanelWidth => ScaleLogical(390);
+        private int RowPanelHeight => ScaleLogical(82);
+        private int RowVerticalGap => ScaleLogical(92);
+        private int TopButtonsY => ScaleLogical(12);
+        private int FirstRowY => ScaleLogical(68); // fallback start if no HR yet
 
         private Button? _btnSettings;
         private Button? _btnRefresh;
         private Button? _btnSaveLayout;
         private Button? _btnRestoreLayout;
+        private Label? _profileSelectorLabel;
+        private ComboBox? _profileSelector;
+        private Label? _profilePreviewLabel;
+        private Button? _btnOpenDisplaySettings;
         private Label? _sectionTitleLabel;
         private Label? _summaryLabel;
         private Panel? _hrTop;
+        private Panel? _hrProfile;
         private Panel? _missingToolPanel;
         private Label? _missingToolLabel;
         private Button? _missingToolSettingsButton;
         private NotifyIcon? _trayIcon;
         private ContextMenuStrip? _trayMenu;
+        private ToolStripMenuItem? _trayProfilesMenu;
+        private ToolStripMenuItem? _trayApplySelectedProfileItem;
         private readonly ToolTip _toolTip = new() { InitialDelay = 350, ReshowDelay = 100, AutoPopDelay = 8000 };
 
         private int _layoutRightMost;
@@ -113,12 +131,6 @@ namespace WorkMonitorSwitcher
         // Restore robustness
         private bool _deferredLayout; // schedule a full rebuild after restore/show
         private bool IsNormalVisible => Visible && WindowState == FormWindowState.Normal;
-
-        private sealed class PrimaryDisableAttempt
-        {
-            public bool Success { get; init; }
-            public string ErrorMessage { get; init; } = string.Empty;
-        }
 
         private sealed record ReconnectLayoutRestoreRequest(
             string ProfileName,
@@ -193,6 +205,8 @@ namespace WorkMonitorSwitcher
             InitializeComponent();
 
             Text = "Monitor Switcher";
+            AutoScaleMode = AutoScaleMode.Dpi;
+            AutoScaleDimensions = new SizeF(96F, 96F);
             AutoSize = false;
             StartPosition = FormStartPosition.CenterScreen;
             FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -225,8 +239,9 @@ namespace WorkMonitorSwitcher
             _topologySvc = new DisplayTopologyService();
 
             _uiSettings = _uiStore.LoadOrDefault();
-            _startupEnabledForCurrentExecutable = StartupManager.IsEnabled();
-            if (_uiSettings.StartWithWindows != _startupEnabledForCurrentExecutable)
+            _startupRegistrationState = StartupManager.GetRegistrationState();
+            if (_uiSettings.StartWithWindows !=
+                (_startupRegistrationState == StartupRegistrationState.CurrentExecutable))
             {
                 _log.Write(
                     "Observed Windows startup state for this executable without changing the shared settings or Run entry.");
@@ -252,13 +267,54 @@ namespace WorkMonitorSwitcher
 
             _btnRestoreLayout = new ThemedButton
             {
-                Text = "Restore",
+                Text = "Apply",
                 Size = new Size(82, 32),
-                Tone = ThemedButtonTone.Primary
+                Tone = ThemedButtonTone.Primary,
+                Enabled = false
             };
             _btnRestoreLayout.Click += async (_, __) => await RestoreSelectedLayoutProfileAsync(showMessage: true);
             Controls.Add(_btnRestoreLayout);
-            _toolTip.SetToolTip(_btnRestoreLayout, "Restore the selected saved monitor layout.");
+            _toolTip.SetToolTip(_btnRestoreLayout, "Apply only the selected profile's enabled monitor set. Windows keeps the arrangement.");
+
+            _profileSelectorLabel = new Label
+            {
+                AutoSize = false,
+                Text = "Profile",
+                TextAlign = ContentAlignment.MiddleLeft,
+                Size = new Size(58, 28)
+            };
+            Controls.Add(_profileSelectorLabel);
+
+            _profileSelector = new ComboBox
+            {
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                IntegralHeight = true,
+                Size = new Size(RowPanelWidth - 68, 28)
+            };
+            _profileSelector.SelectionChangeCommitted += ProfileSelector_SelectionChangeCommitted;
+            Controls.Add(_profileSelector);
+            _toolTip.SetToolTip(_profileSelector, "Select the monitor profile to apply. Selecting it does not change any monitors.");
+
+            _btnOpenDisplaySettings = new ThemedButton
+            {
+                Text = "Displays",
+                Size = new Size(86, 28),
+                AccessibleName = "Open Windows Display Settings",
+                AccessibleDescription = "Opens Windows Display Settings without changing any monitor."
+            };
+            _btnOpenDisplaySettings.Click += (_, __) => OpenWindowsDisplaySettings();
+            Controls.Add(_btnOpenDisplaySettings);
+            _toolTip.SetToolTip(_btnOpenDisplaySettings, "Open Windows Display Settings.");
+
+            _profilePreviewLabel = new Label
+            {
+                AutoSize = false,
+                AutoEllipsis = true,
+                Text = "Select a saved profile to preview its monitor changes.",
+                TextAlign = ContentAlignment.MiddleLeft,
+                AccessibleName = "Profile change preview"
+            };
+            Controls.Add(_profilePreviewLabel);
 
             _sectionTitleLabel = new Label
             {
@@ -301,6 +357,10 @@ namespace WorkMonitorSwitcher
 
             _hrTop = new Panel { Height = 1, BackColor = SystemColors.ControlDark, Visible = true };
             Controls.Add(_hrTop);
+            _hrProfile = new Panel { Height = 1, BackColor = SystemColors.ControlDark, Visible = true };
+            Controls.Add(_hrProfile);
+
+            RefreshProfileSelectorItems();
 
             SizeChanged += (_, __) => LeftTopButtons();
             Layout += (_, __) => LeftTopButtons();
@@ -319,6 +379,7 @@ namespace WorkMonitorSwitcher
                 _refreshTimer.Stop();
                 await RefreshMonitorsAndUiAsync();
             };
+            _monitorCardAnimationTimer.Tick += (_, __) => AnimateMonitorCards();
 
             LeftTopButtons();
             UpdateTopSeparator();
@@ -359,6 +420,31 @@ namespace WorkMonitorSwitcher
             }));
         }
 
+        protected override void OnDpiChanged(DpiChangedEventArgs e)
+        {
+            base.OnDpiChanged(e);
+            if (IsDisposed || _lifetimeCancellation.IsCancellationRequested)
+                return;
+
+            BeginInvoke(new Action(() =>
+            {
+                if (IsDisposed || _lifetimeCancellation.IsCancellationRequested)
+                    return;
+                LeftTopButtons();
+                UpdateTopSeparator();
+                RefreshMonitorsAndUi();
+            }));
+        }
+
+        private int ScaleLogical(int logicalPixels)
+            => ScaleLogicalValue(logicalPixels, DeviceDpi);
+
+        internal static int ScaleLogicalValue(int logicalPixels, int dpi)
+        {
+            int safeDpi = Math.Max(96, dpi);
+            return Math.Max(0, (int)Math.Round(logicalPixels * safeDpi / 96d));
+        }
+
         // Finish deferred layout on restore from minimized
         protected override void OnSizeChanged(EventArgs e)
         {
@@ -391,6 +477,8 @@ namespace WorkMonitorSwitcher
             _reconnectRestoreTimer?.Dispose();
             _reconnectDetectionRetryTimer?.Stop();
             _reconnectDetectionRetryTimer?.Dispose();
+            _monitorCardAnimationTimer.Stop();
+            _monitorCardAnimationTimer.Dispose();
             _trayIcon?.Dispose();
             _trayMenu?.Dispose();
             base.OnFormClosed(e);
@@ -675,7 +763,7 @@ namespace WorkMonitorSwitcher
             if (!IsNormalVisible) { _deferredLayout = true; return; }
             if (AutoScrollPosition.X != 0 || AutoScrollPosition.Y != 0) return;
 
-            const int spacing = 18;
+            int spacing = ScaleLogical(18);
             int x = SideMargin;
 
             _btnSettings.Location = new Point(x, TopButtonsY);
@@ -708,8 +796,11 @@ namespace WorkMonitorSwitcher
         private int GetSeparatorY()
         {
             int buttonHeight = _btnSettings?.Height ?? 30;
-            return TopButtonsY + buttonHeight + 10;
+            return TopButtonsY + buttonHeight + ScaleLogical(10);
         }
+
+        private int GetProfileSeparatorY()
+            => GetSeparatorY() + ScaleLogical(70);
 
         private void UpdateTopSeparator()
         {
@@ -720,6 +811,39 @@ namespace WorkMonitorSwitcher
             _hrTop.Width = Math.Max(0, contentWidth - (SideMargin * 2));
             _hrTop.Height = 1;
             // color is updated by ApplyTheme
+
+            if (_profileSelectorLabel != null && _profileSelector != null && _btnOpenDisplaySettings != null)
+            {
+                int profileY = y + ScaleLogical(7);
+                _profileSelectorLabel.Location = new Point(SideMargin, profileY);
+                _profileSelector.Location = new Point(_profileSelectorLabel.Right + ScaleLogical(10), profileY);
+                _btnOpenDisplaySettings.Location = new Point(
+                    SideMargin + RowPanelWidth - _btnOpenDisplaySettings.Width,
+                    profileY);
+                _profileSelector.Width = Math.Max(
+                    ScaleLogical(120),
+                    _btnOpenDisplaySettings.Left - ScaleLogical(8) - _profileSelector.Left);
+                _profileSelectorLabel.BringToFront();
+                _profileSelector.BringToFront();
+                _btnOpenDisplaySettings.BringToFront();
+            }
+
+            if (_profilePreviewLabel != null)
+            {
+                _profilePreviewLabel.Location = new Point(
+                    SideMargin,
+                    y + ScaleLogical(38));
+                _profilePreviewLabel.Size = new Size(RowPanelWidth, ScaleLogical(23));
+                _profilePreviewLabel.BringToFront();
+            }
+
+            if (_hrProfile != null)
+            {
+                _hrProfile.Location = new Point(SideMargin, GetProfileSeparatorY());
+                _hrProfile.Width = Math.Max(0, contentWidth - (SideMargin * 2));
+                _hrProfile.Height = 1;
+                _hrProfile.BringToFront();
+            }
 
             UpdateMissingToolPanel();
             UpdateSectionHeaderLayout();
@@ -737,16 +861,18 @@ namespace WorkMonitorSwitcher
             _missingToolLabel.Text = "Monitor detection is limited.\nActive displays only; see Diagnostics.";
             _toolTip.SetToolTip(_missingToolLabel, _displayedDetectionWarning);
 
-            int y = GetSeparatorY() + 8;
+            int y = GetProfileSeparatorY() + ScaleLogical(8);
             int contentWidth = Math.Min(ClientSize.Width, GetCompactClientWidth());
             _missingToolPanel.Location = new Point(SideMargin, y);
             _missingToolPanel.Width = Math.Max(0, contentWidth - (SideMargin * 2));
 
             _missingToolSettingsButton.Location = new Point(
-                _missingToolPanel.Width - _missingToolSettingsButton.Width - 10,
-                11);
-            _missingToolLabel.Location = new Point(12, 6);
-            _missingToolLabel.Size = new Size(Math.Max(0, _missingToolSettingsButton.Left - 20), 40);
+                _missingToolPanel.Width - _missingToolSettingsButton.Width - ScaleLogical(10),
+                ScaleLogical(11));
+            _missingToolLabel.Location = new Point(ScaleLogical(12), ScaleLogical(6));
+            _missingToolLabel.Size = new Size(
+                Math.Max(0, _missingToolSettingsButton.Left - ScaleLogical(20)),
+                ScaleLogical(40));
             _missingToolPanel.BringToFront();
         }
 
@@ -755,14 +881,14 @@ namespace WorkMonitorSwitcher
             if (_sectionTitleLabel == null || _summaryLabel == null)
                 return;
 
-            int y = GetSeparatorY() + (_hrTop?.Height ?? 1) + 12;
+            int y = GetProfileSeparatorY() + (_hrProfile?.Height ?? 1) + ScaleLogical(12);
             if (_missingToolPanel?.Visible == true)
-                y = _missingToolPanel.Bottom + 12;
+                y = _missingToolPanel.Bottom + ScaleLogical(12);
 
             _sectionTitleLabel.Location = new Point(SideMargin, y);
             _summaryLabel.Location = new Point(
                 SideMargin + RowPanelWidth - _summaryLabel.Width,
-                y + 1);
+                y + ScaleLogical(1));
             _sectionTitleLabel.BringToFront();
             _summaryLabel.BringToFront();
         }
@@ -773,12 +899,13 @@ namespace WorkMonitorSwitcher
             int headerBottom = Math.Max(
                 _sectionTitleLabel?.Bottom ?? FirstRowY,
                 _summaryLabel?.Bottom ?? FirstRowY);
-            return Math.Max(FirstRowY, headerBottom + 10);
+            return Math.Max(FirstRowY, headerBottom + ScaleLogical(10));
         }
 
         private void SetupTrayIcon()
         {
             _trayMenu = new ContextMenuStrip();
+            _trayMenu.Opening += (_, __) => RefreshTrayProfileMenu();
             _trayMenu.Items.Add("Open Monitor Switcher", null, (_, __) => RestoreFromTray());
             _trayMenu.Items.Add("Refresh", null, async (_, __) => await ManualRefreshMonitorsAndUiAsync());
             _trayMenu.Items.Add("Save Layout", null, async (_, __) =>
@@ -786,11 +913,16 @@ namespace WorkMonitorSwitcher
                 ShowMainWindowForInteraction();
                 await SaveSelectedLayoutProfileAsync();
             });
-            _trayMenu.Items.Add("Restore Layout", null, async (_, __) =>
+            _trayProfilesMenu = new ToolStripMenuItem("Profiles");
+            _trayMenu.Items.Add(_trayProfilesMenu);
+            _trayApplySelectedProfileItem = new ToolStripMenuItem("Apply Selected Profile");
+            _trayApplySelectedProfileItem.Click += async (_, __) =>
             {
                 ShowMainWindowForInteraction();
                 await RestoreSelectedLayoutProfileAsync(showMessage: true);
-            });
+            };
+            _trayMenu.Items.Add(_trayApplySelectedProfileItem);
+            _trayMenu.Items.Add("Windows Display Settings", null, (_, __) => OpenWindowsDisplaySettings());
             _trayMenu.Items.Add("Settings", null, (sender, e) =>
             {
                 ShowMainWindowForInteraction();
@@ -822,6 +954,128 @@ namespace WorkMonitorSwitcher
             };
 
             _trayIcon.DoubleClick += (_, __) => RestoreFromTray();
+        }
+
+        private void RefreshTrayProfileMenu()
+        {
+            if (_trayProfilesMenu == null)
+                return;
+
+            UpdateProfileApplyButtonState();
+
+            while (_trayProfilesMenu.DropDownItems.Count > 0)
+            {
+                var oldItem = _trayProfilesMenu.DropDownItems[0];
+                _trayProfilesMenu.DropDownItems.RemoveAt(0);
+                oldItem.Dispose();
+            }
+            try
+            {
+                var selected = SelectedLayoutProfileName();
+                bool canApply = !_topologyActionsQuarantined &&
+                                _profileTransactionsHealthy &&
+                                !_displayedDetectionUsedScreenFallback &&
+                                _detected.Count > 0 &&
+                                _displayActionGate.CurrentCount > 0;
+                foreach (var profile in _profileStore.LoadProfileNames())
+                {
+                    var profileName = profile;
+                    var profilePath = _profileStore.GetLayoutPath(profileName);
+                    bool profilePairValid = LayoutProfileTransaction.IsValidProfilePair(
+                        profilePath,
+                        LayoutIdentityStore.GetIdentityPath(profilePath),
+                        out _);
+                    bool exactSetActive = profilePairValid &&
+                                          DisplayTopologyService.IsExactSavedMonitorSetActive(
+                                              profilePath,
+                                              _detected,
+                                              LayoutIdentityStore.Load(profilePath));
+                    var item = new ToolStripMenuItem(profileName)
+                    {
+                        Checked = profileName.Equals(selected, StringComparison.OrdinalIgnoreCase),
+                        Enabled = _displayActionGate.CurrentCount > 0,
+                        ToolTipText = $"Select or apply '{profileName}'."
+                    };
+                    var selectItem = new ToolStripMenuItem("Select")
+                    {
+                        Enabled = !profileName.Equals(selected, StringComparison.OrdinalIgnoreCase),
+                        ToolTipText = "Make this the selected profile without changing any monitor."
+                    };
+                    selectItem.Click += (_, __) =>
+                    {
+                        ShowMainWindowForInteraction();
+                        TrySelectLayoutProfile(profileName, showFailure: true);
+                    };
+
+                    bool profileCanApply = canApply && profilePairValid && !exactSetActive;
+                    var applyItem = new ToolStripMenuItem("Apply")
+                    {
+                        Enabled = profileCanApply,
+                        ToolTipText = profileCanApply
+                            ? $"Apply '{profileName}' without changing monitor geometry."
+                            : exactSetActive
+                                ? "Current profile."
+                                : !profilePairValid
+                                    ? "This saved profile is incomplete or invalid."
+                                    : GetProfileMenuUnavailableReason()
+                    };
+                    applyItem.Click += async (_, __) =>
+                    {
+                        ShowMainWindowForInteraction();
+                        if (TrySelectLayoutProfile(profileName, showFailure: true))
+                            await RestoreSelectedLayoutProfileAsync(showMessage: true);
+                    };
+                    item.DropDownItems.Add(selectItem);
+                    item.DropDownItems.Add(applyItem);
+                    _trayProfilesMenu.DropDownItems.Add(item);
+                }
+
+                if (_trayProfilesMenu.DropDownItems.Count == 0)
+                {
+                    _trayProfilesMenu.DropDownItems.Add(new ToolStripMenuItem("No saved profiles")
+                    {
+                        Enabled = false
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.Write($"Unable to populate the tray profile menu: {ex.Message}");
+                _trayProfilesMenu.DropDownItems.Add(new ToolStripMenuItem("Profiles unavailable")
+                {
+                    Enabled = false
+                });
+            }
+        }
+
+        private void OpenWindowsDisplaySettings()
+        {
+            try
+            {
+                Process.Start(new ProcessStartInfo("ms-settings:display") { UseShellExecute = true });
+            }
+            catch (Exception ex)
+            {
+                _log.Write($"Unable to open Windows Display Settings: {ex.Message}");
+                ThemedMessageBox.Warn(
+                    this,
+                    $"Windows Display Settings could not be opened. {ex.Message}",
+                    "Monitor Switcher",
+                    _uiSettings.DarkMode);
+            }
+        }
+
+        private string GetProfileMenuUnavailableReason()
+        {
+            if (_topologyActionsQuarantined)
+                return GetTopologyActionUnavailableReason();
+            if (!_profileTransactionsHealthy)
+                return "Saved profile recovery has not completed safely.";
+            if (_displayedDetectionUsedScreenFallback)
+                return "Physical monitor identities cannot currently be detected reliably.";
+            if (_displayActionGate.CurrentCount == 0)
+                return "Another monitor action is currently running.";
+            return "This profile cannot currently be applied safely.";
         }
 
         private void SetupSingleInstanceRestoreSignal()
@@ -931,9 +1185,291 @@ namespace WorkMonitorSwitcher
         private string SelectedLayoutPath()
             => _profileStore.GetLayoutPath(SelectedLayoutProfileName());
 
+        private void RefreshProfileSelectorItems()
+        {
+            if (_profileSelector == null)
+                return;
+
+            var profiles = _profileStore.LoadProfileNames();
+            var selected = SelectedLayoutProfileName();
+            _profileSelector.BeginUpdate();
+            try
+            {
+                _profileSelector.Items.Clear();
+                foreach (var profile in profiles)
+                    _profileSelector.Items.Add(profile);
+
+                var selectedItem = profiles.FirstOrDefault(profile =>
+                    profile.Equals(selected, StringComparison.OrdinalIgnoreCase)) ??
+                    profiles.FirstOrDefault() ??
+                    LayoutProfileStore.DefaultProfileName;
+                if (!selectedItem.Equals(selected, StringComparison.OrdinalIgnoreCase))
+                {
+                    _uiSettings.SelectedLayoutProfile = selectedItem;
+                    LogPersistenceResult(
+                        "repair selected monitor profile",
+                        _uiStore.SaveWithResult(_uiSettings));
+                }
+                _profileSelector.SelectedItem = selectedItem;
+            }
+            finally
+            {
+                _profileSelector.EndUpdate();
+            }
+        }
+
+        private void ProfileSelector_SelectionChangeCommitted(object? sender, EventArgs e)
+        {
+            if (_profileSelector?.SelectedItem is not string selectedProfile)
+                return;
+
+            TrySelectLayoutProfile(selectedProfile, showFailure: true);
+        }
+
+        private bool TrySelectLayoutProfile(string selectedProfile, bool showFailure)
+        {
+            if (string.IsNullOrWhiteSpace(selectedProfile))
+                return false;
+
+            var normalised = LayoutProfileStore.NormalizeProfileName(selectedProfile);
+            if (normalised.Equals(SelectedLayoutProfileName(), StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            var previous = _uiSettings.SelectedLayoutProfile;
+            _uiSettings.SelectedLayoutProfile = normalised;
+            var saveResult = _uiStore.SaveWithResult(_uiSettings);
+            LogPersistenceResult($"select monitor profile '{normalised}'", saveResult);
+            if (!saveResult.Success)
+            {
+                _uiSettings.SelectedLayoutProfile = previous;
+                RefreshProfileSelectorItems();
+                if (showFailure)
+                {
+                    ThemedMessageBox.Warn(
+                        this,
+                        $"Unable to select profile '{normalised}'. {saveResult.ErrorMessage}",
+                        "Monitor Switcher",
+                        _uiSettings.DarkMode);
+                }
+                return false;
+            }
+
+            CancelQueuedStartupLayoutRestore("select monitor profile");
+            CancelQueuedReconnectLayoutRestore("select monitor profile");
+            _log.Write($"Selected monitor profile '{normalised}' without changing the active monitor set.");
+            UpdateProfileApplyButtonState();
+            return true;
+        }
+
+        private void UpdateProfileApplyButtonState()
+        {
+            if (_btnRestoreLayout == null)
+                return;
+
+            bool profilePairValid = false;
+            bool exactSetActive = false;
+            string path = SelectedLayoutPath();
+            if (!_displayedDetectionUsedScreenFallback &&
+                LayoutProfileTransaction.IsValidProfilePair(
+                    path,
+                    LayoutIdentityStore.GetIdentityPath(path),
+                    out _))
+            {
+                profilePairValid = true;
+                exactSetActive = DisplayTopologyService.IsExactSavedMonitorSetActive(
+                    path,
+                    _detected,
+                    LayoutIdentityStore.Load(path));
+            }
+
+            bool displayActionAvailable = _displayActionGate.CurrentCount > 0 &&
+                                          CanAttemptProfileRestore(_topologyActionsQuarantined);
+            _btnRestoreLayout.Enabled = ShouldEnableProfileApply(
+                detectionReliable: !_displayedDetectionUsedScreenFallback && _detected.Count > 0,
+                profilePairValid,
+                exactSetActive,
+                displayActionAvailable,
+                profileTransactionsHealthy: _profileTransactionsHealthy);
+            if (_profileSelector != null)
+                _profileSelector.Enabled = _displayActionGate.CurrentCount > 0;
+
+            var palette = _uiSettings.DarkMode ? ThemePalette.Dark() : ThemePalette.Light();
+            Themer.ApplyButtonStyle(_btnRestoreLayout, palette);
+            var preview = BuildProfileMembershipPreview(path, profilePairValid, exactSetActive);
+            var profileStatus = FormatProfileSelectionStatus(
+                exactSetActive,
+                _btnRestoreLayout.Enabled,
+                preview);
+            if (_profilePreviewLabel != null)
+            {
+                _profilePreviewLabel.Text = profileStatus;
+                _profilePreviewLabel.AccessibleDescription = profileStatus.Equals(preview, StringComparison.Ordinal)
+                    ? preview
+                    : $"{profileStatus}. {preview}";
+                _profilePreviewLabel.ForeColor = _topologyActionsQuarantined
+                    ? palette.StatusWarn
+                    : palette.TextSubtle;
+                _toolTip.SetToolTip(_profilePreviewLabel, preview);
+            }
+
+            var applyDescription = _btnRestoreLayout.Enabled
+                ? $"Apply the selected profile's enabled monitor set. {preview} Windows keeps the arrangement."
+                : GetProfileApplyUnavailableReason(profilePairValid, exactSetActive);
+            _btnRestoreLayout.AccessibleName = "Apply selected monitor profile";
+            _btnRestoreLayout.AccessibleDescription = applyDescription;
+            _toolTip.SetToolTip(
+                _btnRestoreLayout,
+                applyDescription);
+            if (_trayApplySelectedProfileItem != null)
+            {
+                _trayApplySelectedProfileItem.Enabled = _btnRestoreLayout.Enabled;
+                _trayApplySelectedProfileItem.ToolTipText = applyDescription;
+            }
+        }
+
+        internal static bool ShouldEnableProfileApply(
+            bool detectionReliable,
+            bool profilePairValid,
+            bool exactSetActive,
+            bool displayActionAvailable,
+            bool profileTransactionsHealthy = true)
+            => detectionReliable &&
+               profilePairValid &&
+               !exactSetActive &&
+               displayActionAvailable &&
+               profileTransactionsHealthy;
+
+        internal static bool CanAttemptProfileRestore(bool topologyActionsQuarantined)
+            => !topologyActionsQuarantined;
+
+        internal static string FormatProfileSelectionStatus(
+            bool exactSetActive,
+            bool applyEnabled,
+            string unavailableReason)
+        {
+            if (exactSetActive)
+                return "Current profile";
+            return applyEnabled
+                ? "Click Apply to use this profile"
+                : unavailableReason;
+        }
+
+        private string GetProfileApplyUnavailableReason(bool profilePairValid, bool exactSetActive)
+        {
+            if (_topologyActionsQuarantined)
+                return GetTopologyActionUnavailableReason();
+            if (!_profileTransactionsHealthy)
+                return "Apply is unavailable because saved profile recovery has not completed safely.";
+            if (_displayActionGate.CurrentCount == 0)
+                return "Apply is unavailable while another monitor action is running.";
+            if (exactSetActive)
+                return "The selected profile is already applied.";
+            if (_displayedDetectionUsedScreenFallback || _detected.Count == 0)
+                return "Apply is unavailable until monitor identities can be detected reliably.";
+            if (!profilePairValid)
+                return "Apply is unavailable because the selected saved profile is incomplete or invalid.";
+            return "Apply is unavailable until the selected profile and monitor identities can be verified.";
+        }
+
+        private string BuildProfileMembershipPreview(
+            string layoutPath,
+            bool profilePairValid,
+            bool exactSetActive,
+            IReadOnlyCollection<DetectedMonitor>? detectedMonitors = null)
+        {
+            var previewDetected = detectedMonitors ?? _detected;
+            if (_topologyActionsQuarantined)
+                return GetTopologyActionUnavailableReason();
+            if (!_profileTransactionsHealthy)
+                return "Saved profiles require recovery before they can be applied.";
+            if (!profilePairValid)
+                return "This profile is incomplete; save it again before applying it.";
+            if ((detectedMonitors == null && _displayedDetectionUsedScreenFallback) ||
+                previewDetected.Count == 0)
+                return "Monitor identities are not currently reliable enough to preview this profile.";
+            if (exactSetActive)
+                return "Current profile";
+
+            try
+            {
+                var identities = LayoutIdentityStore.Load(layoutPath);
+                var membership = DisplayTopologyService.ResolveSavedProfileMembership(
+                    layoutPath,
+                    previewDetected,
+                    identities);
+                if (!membership.Success)
+                    return membership.ErrorMessage;
+
+                var active = previewDetected
+                    .Where(monitor => monitor.IsPresent && monitor.IsActive)
+                    .ToList();
+                if (active.Any(monitor =>
+                        !NativeDisplayProfileCodec.IsStrongTargetPath(monitor.NativeTargetPath)))
+                {
+                    return "Monitor identities are not currently reliable enough to preview this profile.";
+                }
+
+                var savedTargets = membership.PresentSavedMonitors
+                    .Select(monitor => NativeDisplayProfileCodec.NormaliseTargetPath(monitor.NativeTargetPath))
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                var activeTargets = active
+                    .Select(monitor => NativeDisplayProfileCodec.NormaliseTargetPath(monitor.NativeTargetPath))
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                var enable = membership.PresentSavedMonitors
+                    .Where(monitor => !activeTargets.Contains(
+                        NativeDisplayProfileCodec.NormaliseTargetPath(monitor.NativeTargetPath)))
+                    .Select(GetPresentationTitle)
+                    .OrderBy(name => name, StringComparer.CurrentCultureIgnoreCase)
+                    .ToList();
+                var disable = active
+                    .Where(monitor => !savedTargets.Contains(
+                        NativeDisplayProfileCodec.NormaliseTargetPath(monitor.NativeTargetPath)))
+                    .Select(GetPresentationTitle)
+                    .OrderBy(name => name, StringComparer.CurrentCultureIgnoreCase)
+                    .ToList();
+
+                return FormatProfileMembershipPreview(
+                    enable,
+                    disable,
+                    membership.UnavailableSavedMonitorCount);
+            }
+            catch (Exception ex)
+            {
+                _log.Write($"Unable to build the selected profile preview: {ex.Message}");
+                return "The selected profile membership could not be previewed safely.";
+            }
+        }
+
+        internal static string FormatProfileMembershipPreview(
+            IReadOnlyCollection<string> enable,
+            IReadOnlyCollection<string> disable,
+            int unavailableCount)
+        {
+            var parts = new List<string>();
+            if (enable.Count > 0)
+                parts.Add($"Enable: {string.Join(", ", enable)}");
+            if (disable.Count > 0)
+                parts.Add($"Disable: {string.Join(", ", disable)}");
+            if (unavailableCount > 0)
+                parts.Add($"Unavailable saved monitor{(unavailableCount == 1 ? string.Empty : "s")}: {unavailableCount}");
+            return parts.Count == 0
+                ? "No monitor membership changes are required."
+                : string.Join(" · ", parts);
+        }
+
+        private string GetMonitorDisplayNameForDevice(string deviceName)
+        {
+            var monitor = _detected.FirstOrDefault(item =>
+                MonitorTargetResolver.TargetsEquivalent(item.DeviceName, deviceName));
+            return monitor == null ? deviceName.Replace(@"\\.\", string.Empty) : GetAliasFor(monitor.StableKey);
+        }
+
         private void QueueStartupLayoutRestore()
         {
-            if (!_uiSettings.RestoreLayoutOnStartup || !_profileTransactionsHealthy)
+            if (!_uiSettings.RestoreLayoutOnStartup ||
+                !_profileTransactionsHealthy ||
+                _topologyActionsQuarantined)
                 return;
 
             if (_startupRestoreTimer != null)
@@ -953,7 +1489,9 @@ namespace WorkMonitorSwitcher
 
         private async Task RestoreLayoutOnStartupAsync()
         {
-            if (!_uiSettings.RestoreLayoutOnStartup || !_profileTransactionsHealthy)
+            if (!_uiSettings.RestoreLayoutOnStartup ||
+                !_profileTransactionsHealthy ||
+                _topologyActionsQuarantined)
                 return;
 
             var profile = SelectedLayoutProfileName();
@@ -1046,99 +1584,12 @@ namespace WorkMonitorSwitcher
 
         private void ObserveReconnectLayoutState(bool allowTrigger, bool detectionIsReliable)
         {
-            if (!_profileTransactionsHealthy)
-                return;
-
-            if (!detectionIsReliable)
-            {
-                ObserveDefiniteIncompleteFallbackLayoutState();
-                _log.Write("Deferred reconnect layout-state evaluation because monitor detection used the Windows Screen fallback.");
-                return;
-            }
-
-            var profile = SelectedLayoutProfileName();
-            var path = SelectedLayoutPath();
-            var profileIdentity = BuildLayoutProfileIdentity(profile, path);
-            var savedIdentities = LayoutIdentityStore.Load(path);
-            var exactSavedSetActive = DisplayTopologyService.IsExactSavedMonitorSetActive(
-                path,
-                _detected,
-                savedIdentities);
-            var arrivalGeneration = _monitorArrivalAfterRemovalGeneration;
-            var hasUnconsumedPhysicalReconnect = ShouldEvaluatePhysicalReconnect(
-                arrivalGeneration,
-                _consumedMonitorArrivalAfterRemovalGeneration);
-
-            if (_pendingReconnectLayoutRestore != null &&
-                (!exactSavedSetActive ||
-                 !string.Equals(
-                     _pendingReconnectLayoutRestore.ProfileIdentity,
-                     profileIdentity,
-                     StringComparison.OrdinalIgnoreCase)))
-            {
-                ClearQueuedReconnectLayoutRestore(
-                    "Cancelled queued reconnect layout restore because the active monitor set or selected profile changed.");
-            }
-
-            var shouldRestore = _reconnectRestoreTracker.Observe(
-                profileIdentity,
-                exactSavedSetActive,
-                allowTrigger);
-            if (shouldRestore)
-            {
-                QueueReconnectLayoutRestore(
-                    profile,
-                    path,
-                    profileIdentity,
-                    hasUnconsumedPhysicalReconnect ? arrivalGeneration : 0);
-                if (hasUnconsumedPhysicalReconnect)
-                    _consumedMonitorArrivalAfterRemovalGeneration = arrivalGeneration;
-            }
-            else if (exactSavedSetActive &&
-                     hasUnconsumedPhysicalReconnect)
-            {
-                var applied = _topologySvc.CheckSavedLayoutApplied(
-                    path,
-                    _detected,
-                    savedIdentities);
-                if (applied.State == SavedLayoutAppliedState.NotApplied)
-                {
-                    QueueReconnectLayoutRestore(
-                        profile,
-                        path,
-                        profileIdentity,
-                        arrivalGeneration);
-                    _log.Write(
-                        $"Queued safe reconnect restore for profile '{profile}' after a physical monitor removal/arrival cycle because its saved geometry was not applied.");
-                }
-                else
-                {
-                    _log.Write(
-                        applied.State == SavedLayoutAppliedState.Applied
-                            ? $"Consumed physical reconnect evidence for profile '{profile}' because its saved geometry was already applied."
-                            : $"Skipped physical reconnect layout restore for profile '{profile}' because saved geometry verification was inconclusive: {applied.Message}");
-                }
-
-                // Do not let stale physical-event evidence turn a later manual
-                // rearrangement into an automatic restore. An inconclusive check
-                // is consumed safely without changing the topology.
-                _consumedMonitorArrivalAfterRemovalGeneration = arrivalGeneration;
-            }
-            else if (hasUnconsumedPhysicalReconnect && !exactSavedSetActive)
-            {
-                // This arrival does not describe the selected profile's complete,
-                // exact monitor set. Consume it so unrelated later layout changes
-                // cannot reuse stale hardware evidence.
-                _consumedMonitorArrivalAfterRemovalGeneration = arrivalGeneration;
-                _log.Write(
-                    $"Consumed physical reconnect evidence because the active monitor set did not exactly match profile '{profile}'.");
-            }
-            else if (allowTrigger &&
-                     exactSavedSetActive &&
-                     _pendingReconnectLayoutRestore != null)
-            {
-                RestartReconnectLayoutRestoreTimer();
-            }
+            _ = allowTrigger;
+            _ = detectionIsReliable;
+            _reconnectRestoreTracker.Reset();
+            _consumedMonitorArrivalAfterRemovalGeneration = _monitorArrivalAfterRemovalGeneration;
+            ClearQueuedReconnectLayoutRestore(
+                "Cancelled queued reconnect geometry restore because Windows Display Settings now owns monitor arrangement.");
         }
 
         internal static bool ShouldEvaluatePhysicalReconnect(
@@ -1187,6 +1638,13 @@ namespace WorkMonitorSwitcher
         {
             try
             {
+                if (_topologyActionsQuarantined)
+                {
+                    ClearReconnectLayoutRestoreRequest(request);
+                    _log.Write("Skipped automatic reconnect profile apply while display topology confidence is quarantined.");
+                    return;
+                }
+
                 if (!IsReconnectRestoreRequestCurrent(request))
                     return;
 
@@ -1292,63 +1750,10 @@ namespace WorkMonitorSwitcher
                         }
                     }
 
-                    var result = await ApplySavedLayoutTopologyWithRetryAsync(
-                        currentProfile,
-                        currentPath,
-                        requireReliableDetection: true);
-                    if (!result.Success)
-                    {
-                        if (result.RollbackAttempted && !result.RollbackVerified)
-                        {
-                            ClearReconnectLayoutRestoreRequest(request);
-                            _log.Write(
-                                $"Reconnect layout restore for profile '{currentProfile}' stopped because rollback could not be verified. " +
-                                "No automatic retry will run until a new display event is observed.");
-                            return;
-                        }
-
-                        const int maxTopologyAttempts = 3;
-                        if (request.TopologyAttempt < maxTopologyAttempts &&
-                            IsReconnectRestoreRequestCurrent(request))
-                        {
-                            var retryRequest = request with
-                            {
-                                TopologyAttempt = request.TopologyAttempt + 1
-                            };
-                            _pendingReconnectLayoutRestore = retryRequest;
-                            RestartReconnectLayoutRestoreTimer();
-                            _log.Write(
-                                $"Reconnect layout restore for profile '{currentProfile}' failed transiently; " +
-                                $"queued safe CCD retry {retryRequest.TopologyAttempt} of {maxTopologyAttempts} without running the active-set-changing fallback.");
-                        }
-                        else
-                        {
-                            ClearReconnectLayoutRestoreRequest(request);
-                            _log.Write(
-                                $"Reconnect layout restore for profile '{currentProfile}' failed after {request.TopologyAttempt} safe CCD attempt(s) without running the active-set-changing fallback.");
-                        }
-                        return;
-                    }
-
+                    ClearReconnectLayoutRestoreRequest(request);
                     _log.Write(
-                        $"Auto-restored identity-matched layout profile '{currentProfile}' after the saved monitors physically reconnected.");
-                    _pendingReconnectLayoutRestore = null;
-                    await RefreshMonitorsAndUiAsync(allowDuringDisplayAction: true);
-                    _lifetimeCancellation.Token.ThrowIfCancellationRequested();
-                    var primaryResult = await EnforcePreferredPrimaryIfActiveAsync(
-                        "preferred primary after reconnect restore");
-                    if (HasUnverifiedRollback(primaryResult))
-                    {
-                        SurfaceUnverifiedTopology(
-                            primaryResult!,
-                            "Automatic reconnect restore");
-                        return;
-                    }
-                    if (primaryResult?.Success == true)
-                    {
-                        await Task.Delay(400, _lifetimeCancellation.Token);
-                        await RefreshMonitorsAndUiAsync(allowDuringDisplayAction: true);
-                    }
+                        $"Skipped legacy reconnect geometry restore for profile '{currentProfile}'; " +
+                        "Windows Display Settings owns monitor position, orientation and primary selection.");
                 }
                 finally
                 {
@@ -1434,7 +1839,7 @@ namespace WorkMonitorSwitcher
         {
             if (!await WaitForPendingMonitorRefreshAsync())
                 return;
-            if (!TryBeginDisplayAction("save layout"))
+            if (!TryBeginDisplayAction("save layout", requiresTrustedTopology: false))
                 return;
 
             try
@@ -1495,6 +1900,9 @@ namespace WorkMonitorSwitcher
                 else if (!string.IsNullOrWhiteSpace(settingsResult.WarningMessage))
                     warnings.Add(settingsResult.WarningMessage);
 
+                RefreshProfileSelectorItems();
+                UpdateProfileApplyButtonState();
+
                 var message = $"Layout profile '{profile}' saved.";
                 if (warnings.Count > 0)
                     message += $"\n\nSome profile metadata could not be saved:\n{string.Join("\n", warnings)}";
@@ -1509,69 +1917,6 @@ namespace WorkMonitorSwitcher
             {
                 EndDisplayAction("save layout");
             }
-        }
-
-        private async Task<PersistenceResult> AutoSaveSelectedLayoutBeforeDisableAsync()
-        {
-            var profile = SelectedLayoutProfileName();
-            var path = SelectedLayoutPath();
-
-            if (!_profileTransactionsHealthy)
-            {
-                _log.Write(
-                    $"Skipped automatic layout profile save for '{profile}' because an earlier profile transaction could not be recovered safely.");
-                return PersistenceResult.Failed(
-                    "Layout profiles are in an unresolved recovery state. See diagnostics.log; no monitor was disabled.");
-            }
-
-            if (!_uiSettings.AutoSaveLayoutBeforeDisable)
-            {
-                _log.Write($"Skipped automatic layout profile save before disable because auto-save is disabled. Profile '{profile}' at {path} remains unchanged.");
-                return PersistenceResult.Unchanged();
-            }
-
-            _log.Write($"Automatic layout profile save before disable requested for '{profile}' at {path}.");
-
-            if (!File.Exists(path))
-            {
-                return PersistenceResult.Failed(
-                    $"Layout profile '{profile}' has not been saved yet. Save it before disabling a monitor, or turn off automatic save-before-disable.");
-            }
-
-            var detection = await _detectSvc.DetectWithStatusAsync(_lifetimeCancellation.Token);
-            _lifetimeCancellation.Token.ThrowIfCancellationRequested();
-            if (detection.UsedScreenFallback)
-            {
-                return PersistenceResult.Failed(
-                    "Monitor identities could not be verified reliably. No profile was overwritten and no monitor was disabled.");
-            }
-
-            var savedIdentities = LayoutIdentityStore.Load(path);
-            if (!DisplayTopologyService.IsExactSavedMonitorSetActive(
-                    path,
-                    detection.Monitors,
-                    savedIdentities))
-            {
-                return PersistenceResult.Failed(
-                    $"The currently active physical monitor set does not exactly match profile '{profile}'. " +
-                    "Automatic save was stopped so a disconnected monitor is not removed from the profile.");
-            }
-
-            if (File.Exists(path) && !TryCreateAutoSaveBackup(profile, path, out var backupPath, out var backupError))
-            {
-                _log.Write($"Skipped automatic layout profile save for '{profile}' because backup failed: {backupError}");
-                return PersistenceResult.Failed(
-                    $"A safe backup of profile '{profile}' could not be created: {backupError}");
-            }
-
-            var saveResult = await SaveLayoutProfileTransactionAsync(profile, path, "Automatically saved");
-            _lifetimeCancellation.Token.ThrowIfCancellationRequested();
-            _log.Write(saveResult.Success
-                ? $"Automatically saved layout profile '{profile}' before disable to {path}."
-                : $"Failed to automatically save layout profile '{profile}' before disable: {saveResult.ErrorMessage}");
-            if (!string.IsNullOrWhiteSpace(saveResult.WarningMessage))
-                _log.Write($"Automatic layout profile save warning for '{profile}': {saveResult.WarningMessage}");
-            return saveResult;
         }
 
         private async Task<PersistenceResult> SaveLayoutProfileTransactionAsync(
@@ -1653,72 +1998,6 @@ namespace WorkMonitorSwitcher
             }
         }
 
-        private bool TryCreateAutoSaveBackup(
-            string profile,
-            string layoutPath,
-            out string backupPath,
-            out string errorMessage)
-        {
-            backupPath = string.Empty;
-            errorMessage = string.Empty;
-
-            try
-            {
-                var directory = Path.GetDirectoryName(layoutPath);
-                if (!string.IsNullOrWhiteSpace(directory))
-                    Directory.CreateDirectory(directory);
-
-                backupPath = NextAutoSaveBackupPath(layoutPath, DateTime.Now);
-                File.Copy(layoutPath, backupPath, overwrite: false);
-                var identityPath = LayoutIdentityStore.GetIdentityPath(layoutPath);
-                if (File.Exists(identityPath))
-                {
-                    var backupIdentityPath = LayoutIdentityStore.GetIdentityPath(backupPath);
-                    var identityBackupCreated = false;
-                    try
-                    {
-                        File.Copy(identityPath, backupIdentityPath, overwrite: false);
-                        identityBackupCreated = true;
-                    }
-                    catch
-                    {
-                        try { File.Delete(backupPath); } catch { /* best-effort rollback */ }
-                        if (identityBackupCreated)
-                        {
-                            try { File.Delete(backupIdentityPath); } catch { /* best-effort rollback */ }
-                        }
-                        throw;
-                    }
-                }
-                _log.Write($"Backed up layout profile '{profile}' before automatic save to {backupPath}.");
-                return true;
-            }
-            catch (Exception ex)
-            {
-                errorMessage = ex.Message;
-                return false;
-            }
-        }
-
-        internal static string NextAutoSaveBackupPath(string layoutPath, DateTime timestamp)
-        {
-            var stamp = timestamp.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
-            var basePath = $"{layoutPath}.autosave-{stamp}.bak";
-            if (!File.Exists(basePath) &&
-                !File.Exists(LayoutIdentityStore.GetIdentityPath(basePath)))
-                return basePath;
-
-            for (int i = 2; i < 1000; i++)
-            {
-                var candidate = $"{layoutPath}.autosave-{stamp}-{i}.bak";
-                if (!File.Exists(candidate) &&
-                    !File.Exists(LayoutIdentityStore.GetIdentityPath(candidate)))
-                    return candidate;
-            }
-
-            return $"{layoutPath}.autosave-{stamp}-{Guid.NewGuid():N}.bak";
-        }
-
         internal static Size CalculateScrollableClientSize(
             int desiredWidth,
             int desiredHeight,
@@ -1787,18 +2066,37 @@ namespace WorkMonitorSwitcher
 
         private async Task RestoreSelectedLayoutProfileAsync(
             bool showMessage,
-            bool isStartupRestore = false)
+            bool isStartupRestore = false,
+            bool displayActionAlreadyHeld = false)
         {
-            if (!await WaitForPendingMonitorRefreshAsync())
-                return;
-            if (!TryBeginDisplayAction("restore layout", showMessage))
+            if (!CanAttemptProfileRestore(_topologyActionsQuarantined))
             {
-                if (isStartupRestore && _uiSettings.RestoreLayoutOnStartup)
+                if (showMessage)
                 {
-                    _log.Write("Deferred startup layout restore after losing the display-action gate race.");
-                    QueueStartupLayoutRestore();
+                    ThemedMessageBox.Warn(
+                        this,
+                        GetTopologyActionUnavailableReason(),
+                        "Apply Monitor Profile",
+                        _uiSettings.DarkMode);
                 }
+
+                _log.Write("Monitor profile apply skipped while display topology is quarantined.");
                 return;
+            }
+
+            if (!displayActionAlreadyHeld)
+            {
+                if (!await WaitForPendingMonitorRefreshAsync())
+                    return;
+                if (!TryBeginDisplayAction("restore layout", showMessage))
+                {
+                    if (isStartupRestore && _uiSettings.RestoreLayoutOnStartup)
+                    {
+                        _log.Write("Deferred startup layout restore after losing the display-action gate race.");
+                        QueueStartupLayoutRestore();
+                    }
+                    return;
+                }
             }
 
             try
@@ -1813,9 +2111,9 @@ namespace WorkMonitorSwitcher
                         if (showMessage)
                         {
                             ThemedMessageBox.Warn(this,
-                                "Layout profiles are in an unresolved recovery state and cannot be restored safely. " +
+                                "Layout profiles are in an unresolved recovery state and cannot be applied safely. " +
                                 "See diagnostics.log for details; no display changes were made.",
-                                "Restore Layout", _uiSettings.DarkMode);
+                                "Apply Monitor Profile", _uiSettings.DarkMode);
                         }
                         return;
                     }
@@ -1828,99 +2126,109 @@ namespace WorkMonitorSwitcher
                 {
                     if (showMessage)
                         ThemedMessageBox.Warn(this,
-                            $"Unable to restore layout profile '{profile}'. Save it first.",
-                            "Restore Layout", _uiSettings.DarkMode);
+                            $"Unable to apply monitor profile '{profile}'. Save it first.",
+                            "Apply Monitor Profile", _uiSettings.DarkMode);
                     return;
                 }
 
                 CancelQueuedStartupLayoutRestore("restore layout");
                 CancelQueuedReconnectLayoutRestore("restore layout");
 
-                var result = await ApplySavedLayoutTopologyWithRetryAsync(
-                    profile,
-                    path,
-                    requireReliableDetection: isStartupRestore);
-                if (!result.Success &&
-                    !isStartupRestore &&
-                    !(result.RollbackAttempted && !result.RollbackVerified))
+                var savedIdentities = LayoutIdentityStore.Load(path);
+                var detection = await _detectSvc.DetectWithStatusAsync(_lifetimeCancellation.Token);
+                _lifetimeCancellation.Token.ThrowIfCancellationRequested();
+                DisplayTopologyResult result;
+                if (detection.UsedScreenFallback)
                 {
-                    var savedIdentities = LayoutIdentityStore.Load(path);
-                    var detection = await _detectSvc.DetectWithStatusAsync(_lifetimeCancellation.Token);
-                    _lifetimeCancellation.Token.ThrowIfCancellationRequested();
-                    if (detection.UsedScreenFallback)
+                    result = new DisplayTopologyResult
                     {
-                        result = new DisplayTopologyResult
-                        {
-                            Success = false,
-                            Message = "Reliable physical monitor detection was unavailable; the active display set was not changed."
-                        };
-                    }
-                    else
+                        Success = false,
+                        Message = "Reliable physical monitor detection was unavailable; the active display set was not changed."
+                    };
+                }
+                else if (DisplayTopologyService.IsExactSavedMonitorSetActive(
+                             path,
+                             detection.Monitors,
+                             savedIdentities))
+                {
+                    result = new DisplayTopologyResult
                     {
+                        Success = true,
+                        Message = "The requested monitor set is already active; Windows' arrangement was left unchanged."
+                    };
+                }
+                else
+                {
+                    int savedActiveCount = DisplayTopologyService.GetSavedActiveMonitorCount(path);
+                    int currentActiveCount = detection.Monitors.Count(monitor => monitor.IsPresent && monitor.IsActive);
+                    if (showMessage && ShouldConfirmExactSetRestore(_uiSettings.ConfirmBeforeDisable))
+                    {
+                        var membershipPreview = BuildProfileMembershipPreview(
+                            path,
+                            profilePairValid: true,
+                            exactSetActive: false,
+                            detectedMonitors: detection.Monitors);
+                        var exactSetMessage =
+                            $"Applying profile '{profile}' will enable its saved monitors and disable active monitors that are not in it. " +
+                            "Windows Display Settings will remain responsible for their position, orientation and primary display." +
+                            Environment.NewLine + Environment.NewLine +
+                            membershipPreview +
+                            Environment.NewLine + Environment.NewLine +
+                            "Continue?";
                         var choice = MessageBox.Show(
                             this,
-                            $"Restoring '{profile}' requires an exact display-set restore. " +
-                            "Windows may enable monitors saved in the profile and disable currently active monitors that are not in it. Continue?",
-                            "Restore Monitor Set",
+                            exactSetMessage,
+                            displayActionAlreadyHeld ? "Apply Layout Profile" : "Apply Monitor Profile",
                             MessageBoxButtons.YesNo,
                             MessageBoxIcon.Warning);
                         if (choice != DialogResult.Yes)
                             return;
-
-                        _lifetimeCancellation.Token.ThrowIfCancellationRequested();
-                        var exactResult = _layoutSvc.RestoreLayoutWithResult(
-                            path,
-                            detection.Monitors,
-                            savedIdentities);
-                        LogTopologyResult($"native exact-set restore for profile '{profile}'", exactResult);
-                        _log.Write(exactResult.Success
-                            ? $"Native exact-set restore applied for layout profile '{profile}' from {path}."
-                            : $"Native exact-set restore failed for layout profile '{profile}' from {path}.");
-
-                        if (exactResult.Success)
-                        {
-                            await Task.Delay(800, _lifetimeCancellation.Token);
-                            result = await ApplySavedLayoutTopologyWithRetryAsync(profile, path);
-                        }
-                        else
-                        {
-                            result = exactResult;
-                        }
                     }
+                    else
+                    {
+                        _log.Write(
+                            isStartupRestore
+                                ? $"Applying monitor set for profile '{profile}' from the enabled startup-profile setting " +
+                                  $"(saved active={savedActiveCount}, current active={currentActiveCount})."
+                                : $"Applying monitor set for profile '{profile}' without confirmation because " +
+                                  $"Confirm before disabling is off (saved active={savedActiveCount}, current active={currentActiveCount}).");
+                    }
+
+                    _lifetimeCancellation.Token.ThrowIfCancellationRequested();
+                    result = _layoutSvc.RestoreLayoutWithResult(
+                        path,
+                        detection.Monitors,
+                        savedIdentities);
                 }
-                else if (!result.Success)
+
+                if (!await HandleTopologyResultAsync(
+                        $"native monitor-set apply for profile '{profile}'",
+                        result,
+                        "Apply Monitor Profile"))
                 {
-                    _log.Write(
-                        $"Startup restore for layout profile '{profile}' did not change the active display set. " +
-                        "Use Restore manually if monitors must be enabled or disabled.");
+                    return;
                 }
 
                 if (!result.Success)
                 {
                     if (showMessage)
                         ThemedMessageBox.Warn(this,
-                            $"Unable to restore layout profile '{profile}'. {result.Message}",
-                            "Restore Layout", _uiSettings.DarkMode);
+                            $"Unable to apply monitor profile '{profile}'. {result.Message}",
+                            "Apply Monitor Profile", _uiSettings.DarkMode);
                     return;
                 }
 
                 await RefreshMonitorsAndUiAsync(allowDuringDisplayAction: true);
                 _lifetimeCancellation.Token.ThrowIfCancellationRequested();
-                var primaryResult = await EnforcePreferredPrimaryIfActiveAsync(
-                    "preferred primary after layout restore");
-                if (HasUnverifiedRollback(primaryResult))
-                {
-                    SurfaceUnverifiedTopology(primaryResult!, "Restore Layout");
-                    return;
-                }
-                if (primaryResult?.Success == true)
-                {
-                    await Task.Delay(400, _lifetimeCancellation.Token);
-                    await RefreshMonitorsAndUiAsync(allowDuringDisplayAction: true);
-                }
 
                 if (showMessage)
-                    ThemedMessageBox.Info(this, $"Layout profile '{profile}' restored.", "Restore Layout", _uiSettings.DarkMode);
+                {
+                    ThemedMessageBox.Info(
+                        this,
+                        $"Profile '{profile}' applied.",
+                        "Apply Monitor Profile",
+                        _uiSettings.DarkMode);
+                }
             }
             catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
             {
@@ -1928,69 +2236,53 @@ namespace WorkMonitorSwitcher
             }
             finally
             {
-                EndDisplayAction("restore layout");
+                if (!displayActionAlreadyHeld)
+                    EndDisplayAction("restore layout");
             }
-        }
-
-        private async Task<DisplayTopologyResult> ApplySavedLayoutTopologyWithRetryAsync(
-            string profile,
-            string path,
-            bool requireReliableDetection = false)
-        {
-            DisplayTopologyResult? result = null;
-            var savedIdentities = LayoutIdentityStore.Load(path);
-            if (savedIdentities.Count > 0)
-                _log.Write($"Loaded {savedIdentities.Count} saved monitor identity record(s) for layout profile '{profile}'.");
-
-            for (int attempt = 0; attempt < 5; attempt++)
-            {
-                var detection = await _detectSvc.DetectWithStatusAsync(_lifetimeCancellation.Token);
-                _lifetimeCancellation.Token.ThrowIfCancellationRequested();
-                if (requireReliableDetection && detection.UsedScreenFallback)
-                {
-                    result = new DisplayTopologyResult
-                    {
-                        Success = false,
-                        Message = "Reliable monitor identity detection was unavailable for the automatic layout restore."
-                    };
-                }
-                else
-                {
-                    result = _topologySvc.ApplyLayoutPositionsFromConfig(
-                        path,
-                        detection.Monitors,
-                        savedIdentities);
-                }
-                if (result.Success)
-                    break;
-                if (result.RollbackAttempted && !result.RollbackVerified)
-                    break;
-
-                await Task.Delay(500, _lifetimeCancellation.Token);
-            }
-
-            result ??= new DisplayTopologyResult
-            {
-                Success = false,
-                Message = "Saved layout topology was not attempted."
-            };
-
-            LogTopologyResult($"CCD layout restore for profile '{profile}'", result);
-            if (result.Success)
-                await Task.Delay(400, _lifetimeCancellation.Token);
-
-            return result;
         }
 
         private void LogTopologyResult(string action, DisplayTopologyResult result)
         {
             _log.Write(
                 $"{action}: success={result.Success}, validate={FormatCode(result.ValidateCode)}, " +
-                $"apply={FormatCode(result.ApplyCode)}, message='{result.Message}'.");
+                $"apply={FormatCode(result.ApplyCode)}, rollbackAttempted={result.RollbackAttempted}, " +
+                $"rollbackVerified={result.RollbackVerified}, " +
+                $"message='{result.Message}'.");
 
             foreach (var detail in result.Details)
                 _log.Write($"{action}: {detail}");
         }
+
+        private async Task<bool> HandleTopologyResultAsync(
+            string action,
+            DisplayTopologyResult result,
+            string title)
+        {
+            LogTopologyResult(action, result);
+            if (!HasUnverifiedRollback(result))
+                return true;
+
+            EnterTopologyQuarantine(result, action);
+            SurfaceUnverifiedTopology(result, title);
+            await RefreshMonitorsAndUiAsync(allowDuringDisplayAction: true);
+            return false;
+        }
+
+        private void EnterTopologyQuarantine(DisplayTopologyResult result, string action)
+        {
+            _topologyActionsQuarantined = true;
+            _topologyQuarantineReason =
+                "A Windows display rollback could not be verified. Monitor actions are paused until Refresh completes with reliable physical identities.";
+            CancelQueuedStartupLayoutRestore("unverified display rollback");
+            CancelQueuedReconnectLayoutRestore("unverified display rollback");
+            _log.Write($"Display topology quarantine entered after {action}: {result.Message}");
+            UpdateButtonStatus();
+        }
+
+        private string GetTopologyActionUnavailableReason()
+            => string.IsNullOrWhiteSpace(_topologyQuarantineReason)
+                ? "Monitor actions are paused until Refresh completes with reliable physical identities."
+                : _topologyQuarantineReason;
 
         private static string FormatCode(int? code)
             => code.HasValue ? code.Value.ToString() : "n/a";
@@ -2018,6 +2310,7 @@ namespace WorkMonitorSwitcher
 
             // Keep HR visible
             if (_hrTop != null) _hrTop.BackColor = palette.Border;
+            if (_hrProfile != null) _hrProfile.BackColor = palette.Border;
             if (_summaryLabel != null) _summaryLabel.ForeColor = palette.TextSubtle;
             ApplyWarningBannerTheme(palette);
             UpdateButtonStatus();
@@ -2051,12 +2344,14 @@ namespace WorkMonitorSwitcher
         // ---------- Settings dialog ----------
         private async void SettingsButton_Click(object? sender, EventArgs e)
         {
+            var restoreChangedProfile = false;
+
             if (!Visible || WindowState == FormWindowState.Minimized || !ShowInTaskbar)
                 ShowMainWindowForInteraction();
 
             if (!await WaitForPendingMonitorRefreshAsync())
                 return;
-            if (!TryBeginDisplayAction("settings"))
+            if (!TryBeginDisplayAction("settings", requiresTrustedTopology: false))
                 return;
 
             try
@@ -2075,46 +2370,67 @@ namespace WorkMonitorSwitcher
                         return;
                     }
                 }
+                var aliasRows = BuildAliasSettingsRows();
+                var representedAliasKeys = aliasRows
+                    .Select(row => row.StableKey)
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                _startupRegistrationState = StartupManager.GetRegistrationState();
                 using var dlg = new AliasSettingsForm(
-                    BuildAliasSettingsRows(),
+                    aliasRows,
                     _uiSettings.DarkMode,
                     _uiSettings.AlwaysOnTop,
                     _uiSettings.MinimizeToTray,
-                    _startupEnabledForCurrentExecutable,
+                    _startupRegistrationState,
                     _uiSettings.ConfirmBeforeDisable,
-                    _uiSettings.AutoSaveLayoutBeforeDisable,
                     _uiSettings.RestoreLayoutOnStartup,
                     _profileStore.LoadProfileNames(),
                     SelectedLayoutProfileName(),
                     _log.Read(),
-                    this)
+                    readDiagnostics: _log.Read,
+                    clearDiagnosticsLog: () =>
+                    {
+                        var result = _log.ClearWithResult();
+                        return result.Success ? null : result.ErrorMessage;
+                    },
+                    sizingOwner: this)
                 {
                     StartPosition = FormStartPosition.CenterParent,
-                    ShowInTaskbar = false,
-                    TopMost = true
+                    ShowInTaskbar = false
                 };
 
-                var prevTopMost = this.TopMost;
-                DialogResult dr;
-                try
-                {
-                    // Ensure the dialog can float above everything without fighting the host.
-                    this.TopMost = false;
-                    dlg.TopMost = true;
-                    dr = dlg.ShowDialog(this);
-                }
-                finally
-                {
-                    // Restore whatever the user had configured for the main window.
-                    this.TopMost = prevTopMost;
-                }
+                var dr = dlg.ShowDialog(this);
 
                 if (dr != DialogResult.OK)
                     return;
 
                 CancelQueuedStartupLayoutRestore("apply settings");
                 CancelQueuedReconnectLayoutRestore("apply settings");
-                await ApplySettingsDialogResultsAsync(dlg);
+                restoreChangedProfile = await ApplySettingsDialogResultsAsync(dlg, representedAliasKeys);
+                if (restoreChangedProfile)
+                {
+                    _log.Write($"Applying newly selected layout profile '{SelectedLayoutProfileName()}'.");
+                    var restoreButton = _btnRestoreLayout;
+                    var restoreButtonText = restoreButton?.Text;
+                    if (restoreButton != null)
+                    {
+                        restoreButton.Text = "Applying…";
+                        restoreButton.Enabled = false;
+                    }
+                    try
+                    {
+                        await RestoreSelectedLayoutProfileAsync(
+                            showMessage: true,
+                            displayActionAlreadyHeld: true);
+                    }
+                    finally
+                    {
+                        if (restoreButton != null)
+                        {
+                            restoreButton.Text = restoreButtonText ?? "Apply";
+                            UpdateProfileApplyButtonState();
+                        }
+                    }
+                }
             }
             catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
             {
@@ -2131,21 +2447,64 @@ namespace WorkMonitorSwitcher
             {
                 EndDisplayAction("settings");
             }
+
         }
 
         private List<AliasViewRow> BuildAliasSettingsRows()
             => AliasSettingsMapper.BuildRows(BuildPresentationList(), _aliasMap);
 
-        private async Task ApplySettingsDialogResultsAsync(AliasSettingsForm dlg)
+        private async Task<bool> ApplySettingsDialogResultsAsync(
+            AliasSettingsForm dlg,
+            IReadOnlySet<string> representedAliasKeys)
         {
             var warnings = new List<string>();
+            var previousLayoutProfile = SelectedLayoutProfileName();
+
+            var representedAliases = new Dictionary<string, MonitorInfo>(StringComparer.OrdinalIgnoreCase);
+            foreach (var key in representedAliasKeys)
+            {
+                if (_aliasMap.TryGetValue(key, out var info))
+                    representedAliases[key] = info;
+            }
+
+            var representedMappings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var mapping in dlg.UpdatedMappings)
+            {
+                if (representedAliasKeys.Contains(mapping.Key))
+                    representedMappings[mapping.Key] = mapping.Value;
+            }
+
+            var representedPreferredKey = representedAliasKeys.Contains(dlg.PreferredPrimaryKey ?? string.Empty)
+                ? dlg.PreferredPrimaryKey
+                : null;
+            var representedFallbackKey = representedAliasKeys.Contains(dlg.FallbackPrimaryKey ?? string.Empty)
+                ? dlg.FallbackPrimaryKey
+                : null;
+            if (!string.IsNullOrWhiteSpace(representedPreferredKey) &&
+                string.Equals(representedPreferredKey, representedFallbackKey, StringComparison.OrdinalIgnoreCase))
+            {
+                representedFallbackKey = null;
+            }
+
+            ClearExistingMonitorPreferenceFlags(
+                clearPreferred: !string.IsNullOrWhiteSpace(representedPreferredKey),
+                clearFallback: !string.IsNullOrWhiteSpace(representedFallbackKey));
 
             AliasSettingsMapper.ApplyMonitorSettings(
-                _aliasMap,
-                dlg.RemovedKeys,
-                dlg.UpdatedMappings,
-                dlg.PreferredPrimaryKey,
-                dlg.FallbackPrimaryKey);
+                representedAliases,
+                dlg.RemovedKeys.Where(representedAliasKeys.Contains),
+                representedMappings,
+                representedPreferredKey,
+                representedFallbackKey);
+
+            foreach (var key in representedAliasKeys)
+            {
+                if (representedAliases.TryGetValue(key, out var info))
+                    _aliasMap[key] = info;
+                else
+                    _aliasMap.Remove(key);
+            }
+
             var aliasResult = _aliasStore.SaveWithResult(_aliasMap);
             LogPersistenceResult("save monitor aliases", aliasResult);
             if (!aliasResult.Success)
@@ -2168,36 +2527,34 @@ namespace WorkMonitorSwitcher
             if (dlg.MinimizeToTrayResult.HasValue)
                 _uiSettings.MinimizeToTray = dlg.MinimizeToTrayResult.Value;
 
-            if (dlg.StartWithWindowsResult.HasValue &&
-                dlg.StartWithWindowsResult.Value != _startupEnabledForCurrentExecutable)
+            _startupRegistrationState = StartupManager.GetRegistrationState();
+            if (dlg.StartWithWindowsResult.HasValue)
             {
                 var requestedStartupEnabled = dlg.StartWithWindowsResult.Value;
-                var startupResult = StartupManager.SetEnabledWithResult(
-                    requestedStartupEnabled,
-                    Application.ExecutablePath);
-                LogPersistenceResult("update Windows startup", startupResult);
-                if (!startupResult.Success)
+                bool startupUpdateRequired = requestedStartupEnabled
+                    ? _startupRegistrationState != StartupRegistrationState.CurrentExecutable
+                    : _startupRegistrationState != StartupRegistrationState.Missing;
+                if (startupUpdateRequired)
                 {
-                    warnings.Add(startupResult.ErrorMessage);
-                    _startupEnabledForCurrentExecutable = StartupManager.IsEnabled();
-                }
-                else if (!string.IsNullOrWhiteSpace(startupResult.WarningMessage))
-                {
-                    warnings.Add(startupResult.WarningMessage);
-                }
+                    var startupResult = StartupManager.SetEnabledWithResult(
+                        requestedStartupEnabled,
+                        Environment.ProcessPath ?? Application.ExecutablePath);
+                    LogPersistenceResult("update Windows startup", startupResult);
+                    if (!startupResult.Success)
+                        warnings.Add(startupResult.ErrorMessage);
+                    else if (!string.IsNullOrWhiteSpace(startupResult.WarningMessage))
+                        warnings.Add(startupResult.WarningMessage);
 
-                if (startupResult.Success)
-                    _startupEnabledForCurrentExecutable = requestedStartupEnabled;
+                    _startupRegistrationState = StartupManager.GetRegistrationState();
+                }
             }
             // Settings OK is the explicit point at which the observed Run state
             // may be synchronised back to the per-user UI settings file.
-            _uiSettings.StartWithWindows = _startupEnabledForCurrentExecutable;
+            _uiSettings.StartWithWindows =
+                _startupRegistrationState == StartupRegistrationState.CurrentExecutable;
 
             if (dlg.ConfirmBeforeDisableResult.HasValue)
                 _uiSettings.ConfirmBeforeDisable = dlg.ConfirmBeforeDisableResult.Value;
-
-            if (dlg.AutoSaveLayoutBeforeDisableResult.HasValue)
-                _uiSettings.AutoSaveLayoutBeforeDisable = dlg.AutoSaveLayoutBeforeDisableResult.Value;
 
             if (dlg.RestoreLayoutOnStartupResult.HasValue)
                 _uiSettings.RestoreLayoutOnStartup = dlg.RestoreLayoutOnStartupResult.Value;
@@ -2222,21 +2579,14 @@ namespace WorkMonitorSwitcher
             else if (!string.IsNullOrWhiteSpace(settingsResult.WarningMessage))
                 warnings.Add(settingsResult.WarningMessage);
 
+            RefreshProfileSelectorItems();
+
             await RefreshMonitorsAndUiAsync(allowDuringDisplayAction: true);
             _lifetimeCancellation.Token.ThrowIfCancellationRequested();
-            var preferredPrimary = PrimaryMonitorPreference.ResolvePreferredPrimaryTarget(_detected, _aliasMap);
-            var primaryResult = !string.IsNullOrWhiteSpace(preferredPrimary)
-                ? await EnforcePreferredPrimaryIfActiveAsync("preferred primary after settings save")
-                : null;
-            if (!string.IsNullOrWhiteSpace(preferredPrimary) && primaryResult?.Success != true)
-            {
-                warnings.Add(primaryResult?.Message ?? "The preferred primary monitor could not be applied.");
-            }
-            else if (primaryResult?.Success == true)
-            {
-                await Task.Delay(400, _lifetimeCancellation.Token);
-                await RefreshMonitorsAndUiAsync(allowDuringDisplayAction: true);
-            }
+            var selectedLayoutProfileChanged = !string.Equals(
+                previousLayoutProfile,
+                SelectedLayoutProfileName(),
+                StringComparison.OrdinalIgnoreCase);
 
             if (warnings.Count > 0)
             {
@@ -2245,13 +2595,35 @@ namespace WorkMonitorSwitcher
                     "Monitor Switcher",
                     _uiSettings.DarkMode);
             }
+
+            return selectedLayoutProfileChanged && settingsResult.Success;
         }
 
-        private bool TryBeginDisplayAction(string actionName, bool showBusyMessage = true)
+        private bool TryBeginDisplayAction(
+            string actionName,
+            bool showBusyMessage = true,
+            bool requiresTrustedTopology = true)
         {
+            if (requiresTrustedTopology && _topologyActionsQuarantined)
+            {
+                if (showBusyMessage)
+                {
+                    ThemedMessageBox.Warn(
+                        this,
+                        GetTopologyActionUnavailableReason(),
+                        "Monitor Switcher",
+                        _uiSettings.DarkMode);
+                }
+
+                _log.Write($"Display action skipped while topology is quarantined: {actionName}.");
+                UpdateButtonStatus();
+                return false;
+            }
+
             if (_displayActionGate.Wait(0))
             {
                 _log.Write($"Display action started: {actionName}.");
+                UpdateProfileApplyButtonState();
                 return true;
             }
 
@@ -2270,6 +2642,7 @@ namespace WorkMonitorSwitcher
         {
             _log.Write($"Display action finished: {actionName}.");
             _displayActionGate.Release();
+            UpdateProfileApplyButtonState();
 
             if (_reloadAliasesAfterDisplayAction && !_lifetimeCancellation.IsCancellationRequested)
             {
@@ -2421,6 +2794,15 @@ namespace WorkMonitorSwitcher
             if (IsDisposed || _lifetimeCancellation.IsCancellationRequested)
                 return;
 
+            if (_topologyActionsQuarantined &&
+                !detection.UsedScreenFallback &&
+                detection.Monitors.Any(monitor => monitor.IsPresent))
+            {
+                _topologyActionsQuarantined = false;
+                _topologyQuarantineReason = string.Empty;
+                _log.Write("Display topology quarantine cleared after a successful reliable monitor refresh.");
+            }
+
             var detectionIsReliableForReconnect = IsReconnectDetectionSnapshotReliable(
                 reconnectEventGenerationAtDetectionStart,
                 _reconnectDisplayEventGeneration,
@@ -2455,15 +2837,6 @@ namespace WorkMonitorSwitcher
             ReconcileAliasesForDetected();
             SuppressShadowedDeviceFallbackDetections();
 
-            // First-run seeding if exactly three monitors and no aliases
-            if (_aliasMap.Count == 0 && _detected.Count == 3)
-            {
-                var ordered = _detected.OrderBy(d => d.PositionX).ToList();
-                SetAlias(ordered[0].StableKey, "Left Monitor");
-                SetAlias(ordered[1].StableKey, "Middle Monitor");
-                SetAlias(ordered[2].StableKey, "Right Monitor");
-            }
-
             // Keep alias metadata up to date + remember targets
             foreach (var m in _detected)
             {
@@ -2484,6 +2857,8 @@ namespace WorkMonitorSwitcher
                     info.LastInstanceId = m.InstanceId;
                 if (!string.IsNullOrWhiteSpace(m.MonitorId))
                     info.LastMonitorId = m.MonitorId;
+                if (NativeDisplayProfileCodec.IsStrongTargetPath(m.NativeTargetPath))
+                    info.LastNativeTargetPath = NativeDisplayProfileCodec.NormaliseTargetPath(m.NativeTargetPath);
 
                 if (m.IsPresent && m.IsActive)
                     MonitorTargetResolver.EnsureKnownTargets(_aliasMap, m.StableKey, m.DeviceName, m.Name);
@@ -2495,6 +2870,8 @@ namespace WorkMonitorSwitcher
 
             var toShow = BuildPresentationList();
             UpdateMonitorSummary(toShow);
+            CancelMonitorCardDrag();
+            _monitorCardOrder.Clear();
 
             int previousScrollY = Math.Max(0, -AutoScrollPosition.Y);
             if (previousScrollY > 0)
@@ -2523,25 +2900,25 @@ namespace WorkMonitorSwitcher
                 int lastRowBottom = y;
                 foreach (var m in toShow)
                 {
-                    AddMonitorControls(m, GetAliasFor(m.StableKey), y);
+                    AddMonitorControls(m, GetPresentationTitle(m), y);
                     lastRowBottom = y + RowPanelHeight;
                     y += RowVerticalGap;
                 }
 
                 y = toShow.Count > 0
                     ? lastRowBottom
-                    : GetRowsStartY() + 32;
+                    : GetRowsStartY() + ScaleLogical(32);
 
                 int desiredWidth = GetCompactClientWidth();
-                int desiredHeight = Math.Max(120, y + SideMargin);
+                int desiredHeight = Math.Max(ScaleLogical(120), y + SideMargin);
 
                 if (IsNormalVisible)
                 {
                     var hostScreen = Screen.FromControl(this);
                     int nonClientHeight = Math.Max(0, Height - ClientSize.Height);
                     int maxClientHeight = Math.Max(
-                        120,
-                        hostScreen.WorkingArea.Height - nonClientHeight - 32);
+                        ScaleLogical(120),
+                        hostScreen.WorkingArea.Height - nonClientHeight - ScaleLogical(32));
                     var boundedSize = CalculateScrollableClientSize(
                         desiredWidth,
                         desiredHeight,
@@ -2558,6 +2935,7 @@ namespace WorkMonitorSwitcher
                 var palette = _uiSettings.DarkMode ? ThemePalette.Dark() : ThemePalette.Light();
                 Themer.Apply(this, palette);
                 if (_hrTop != null) _hrTop.BackColor = palette.Border;
+                if (_hrProfile != null) _hrProfile.BackColor = palette.Border;
                 if (_summaryLabel != null) _summaryLabel.ForeColor = palette.TextSubtle;
                 ApplyWarningBannerTheme(palette);
 
@@ -2580,6 +2958,9 @@ namespace WorkMonitorSwitcher
             long eventGenerationAtDetectionStart,
             long consumedEventGeneration)
             => eventGenerationAtDetectionStart > consumedEventGeneration;
+
+        internal static bool ShouldConfirmExactSetRestore(bool confirmBeforeDisable)
+            => confirmBeforeDisable;
 
         internal static bool IsReconnectDetectionSnapshotReliable(
             long eventGenerationAtDetectionStart,
@@ -2608,7 +2989,12 @@ namespace WorkMonitorSwitcher
             _btnRefresh?.BringToFront();
             _btnSaveLayout?.BringToFront();
             _btnRestoreLayout?.BringToFront();
+            _profileSelectorLabel?.BringToFront();
+            _profileSelector?.BringToFront();
+            _profilePreviewLabel?.BringToFront();
+            _btnOpenDisplaySettings?.BringToFront();
             _hrTop?.BringToFront();
+            _hrProfile?.BringToFront();
 
             ForceRedraw(this);
         }
@@ -2650,13 +3036,10 @@ namespace WorkMonitorSwitcher
         {
             if (_summaryLabel == null) return;
 
-            int present = monitors.Count(m => m.IsPresent);
-            int active = monitors.Count(m => m.IsPresent && m.IsActive);
-            int savedOnly = monitors.Count - present;
+            int present = monitors.Count;
+            int active = monitors.Count(m => m.IsActive);
 
-            _summaryLabel.Text = savedOnly > 0
-                ? $"{active} of {present} active · {savedOnly} saved"
-                : $"{active} of {present} active";
+            _summaryLabel.Text = $"{active} of {present} active";
             _toolTip.SetToolTip(_summaryLabel, _summaryLabel.Text);
         }
 
@@ -2715,17 +3098,31 @@ namespace WorkMonitorSwitcher
             Controls.Add(card);
             _dynamicControls.Add(card);
 
-            int labelX = 14;
-            int disableX = RowPanelWidth - (ButtonWidth * 2) - ControlGapX - 14;
+            int labelX = ScaleLogical(38);
+            int disableX = RowPanelWidth - (ButtonWidth * 2) - ControlGapX - ScaleLogical(14);
             int enableX = disableX + ButtonWidth + ControlGapX;
-            int buttonY = 43;
+            int buttonY = ScaleLogical(43);
+
+            var dragHandle = new MonitorDragHandle
+            {
+                Location = new Point(ScaleLogical(7), ScaleLogical(7)),
+                Size = new Size(ScaleLogical(24), RowPanelHeight - ScaleLogical(14)),
+                ForeColor = palette.TextSubtle,
+                AccessibleName = $"Reorder {friendlyName}",
+                AccessibleDescription =
+                    $"Reorder {friendlyName}. Drag with the mouse, open the context menu, or press Alt plus Up or Alt plus Down."
+            };
+            card.Controls.Add(dragHandle);
+            AttachMonitorCardDragSurface(dragHandle, monitor.StableKey);
+            AttachMonitorCardKeyboardReordering(dragHandle, monitor.StableKey);
+            _toolTip.SetToolTip(dragHandle, "Drag to reorder, or press Alt+Up / Alt+Down.");
 
             var label = new Label
             {
                 Text = friendlyName,
-                Location = new Point(labelX, 10),
+                Location = new Point(labelX, ScaleLogical(10)),
                 AutoSize = false,
-                Size = new Size(260, 22),
+                Size = new Size(ScaleLogical(236), ScaleLogical(22)),
                 Font = new Font("Segoe UI Semibold", 9.75f, FontStyle.Regular),
                 AutoEllipsis = true
             };
@@ -2736,8 +3133,8 @@ namespace WorkMonitorSwitcher
             var statusLabel = new StatusBadge
             {
                 AutoSize = false,
-                Location = new Point(RowPanelWidth - 100, 10),
-                Size = new Size(86, 24),
+                Location = new Point(RowPanelWidth - ScaleLogical(100), ScaleLogical(10)),
+                Size = new Size(ScaleLogical(86), ScaleLogical(24)),
                 Font = new Font("Segoe UI Semibold", 8.25f, FontStyle.Regular),
                 Text = GetMonitorStatusText(visualStatus),
                 VisualStatus = visualStatus
@@ -2747,9 +3144,11 @@ namespace WorkMonitorSwitcher
             var detail = new Label
             {
                 Text = BuildMonitorDetailText(monitor),
-                Location = new Point(14, 45),
+                Location = new Point(labelX, ScaleLogical(45)),
                 AutoSize = false,
-                Size = new Size(Math.Max(0, disableX - 24), 24),
+                Size = new Size(
+                    Math.Max(0, disableX - labelX - ScaleLogical(10)),
+                    ScaleLogical(24)),
                 AutoEllipsis = true,
                 Font = new Font("Segoe UI", 8.25f, FontStyle.Regular),
                 ForeColor = palette.TextSubtle,
@@ -2764,7 +3163,8 @@ namespace WorkMonitorSwitcher
                 Location = new Point(disableX, buttonY),
                 Size = new Size(ButtonWidth, ButtonHeight),
                 Tag = monitor.StableKey,
-                Tone = ThemedButtonTone.Danger
+                Tone = ThemedButtonTone.Danger,
+                AccessibleName = $"Disable {friendlyName}"
             };
             buttonOff.Click += ButtonOff_Click;
             card.Controls.Add(buttonOff);
@@ -2776,7 +3176,8 @@ namespace WorkMonitorSwitcher
                 Location = new Point(enableX, buttonY),
                 Size = new Size(ButtonWidth, ButtonHeight),
                 Tag = monitor.StableKey,
-                Tone = ThemedButtonTone.Primary
+                Tone = ThemedButtonTone.Primary,
+                AccessibleName = $"Enable {friendlyName}"
             };
             buttonOn.Click += ButtonOn_Click;
             card.Controls.Add(buttonOn);
@@ -2788,21 +3189,367 @@ namespace WorkMonitorSwitcher
 
             _controlsByKey[monitor.StableKey] = new MonitorControls
             {
+                Card = card,
                 DisableButton = buttonOff,
                 EnableButton = buttonOn,
                 StatusLabel = statusLabel,
                 TitleLabel = label,
                 IsBusy = _busy.Contains(monitor.StableKey)
             };
+            _monitorCardOrder.Add(monitor.StableKey);
         }
 
-        private static string BuildMonitorDetailText(DetectedMonitor monitor)
+        private void AttachMonitorCardDragSurface(Control surface, string stableKey)
         {
+            surface.Cursor = Cursors.Hand;
+            surface.MouseDown += (_, e) => BeginMonitorCardDrag(stableKey, surface, e);
+            surface.MouseMove += (_, e) => UpdateMonitorCardDrag(stableKey, surface, e);
+            surface.MouseUp += (_, e) => EndMonitorCardDrag(stableKey, surface, e);
+            surface.MouseCaptureChanged += (_, __) =>
+            {
+                if (!_endingMonitorCardDrag && ReferenceEquals(_monitorCardDragCapture, surface))
+                    FinishMonitorCardDrag(saveOrder: _monitorCardDragActive);
+            };
+        }
+
+        private void AttachMonitorCardKeyboardReordering(Control surface, string stableKey)
+        {
+            surface.KeyDown += (_, e) =>
+            {
+                if (!e.Alt || e.KeyCode is not (Keys.Up or Keys.Down))
+                    return;
+
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+                MoveMonitorCardByKeyboard(stableKey, e.KeyCode == Keys.Up ? -1 : 1, surface);
+            };
+
+            var menu = new ContextMenuStrip();
+            var moveUp = new ToolStripMenuItem("Move Up");
+            var moveDown = new ToolStripMenuItem("Move Down");
+            moveUp.Click += (_, __) => MoveMonitorCardByKeyboard(stableKey, -1, surface);
+            moveDown.Click += (_, __) => MoveMonitorCardByKeyboard(stableKey, 1, surface);
+            menu.Items.Add(moveUp);
+            menu.Items.Add(moveDown);
+            menu.Opening += (_, __) =>
+            {
+                int index = _monitorCardOrder.FindIndex(key =>
+                    key.Equals(stableKey, StringComparison.OrdinalIgnoreCase));
+                bool available = index >= 0 && _displayActionGate.CurrentCount > 0;
+                moveUp.Enabled = available && index > 0;
+                moveDown.Enabled = available && index < _monitorCardOrder.Count - 1;
+            };
+            surface.ContextMenuStrip = menu;
+            surface.Disposed += (_, __) => menu.Dispose();
+        }
+
+        private void MoveMonitorCardByKeyboard(string stableKey, int direction, Control focusControl)
+        {
+            if (_displayActionGate.CurrentCount == 0 || direction == 0)
+                return;
+
+            int currentIndex = _monitorCardOrder.FindIndex(key =>
+                key.Equals(stableKey, StringComparison.OrdinalIgnoreCase));
+            int destinationIndex = currentIndex + Math.Sign(direction);
+            if (currentIndex < 0 || destinationIndex < 0 || destinationIndex >= _monitorCardOrder.Count)
+                return;
+
+            CancelMonitorCardDrag();
+            _monitorCardOrderBeforeDrag.Clear();
+            _monitorCardOrderBeforeDrag.AddRange(_monitorCardOrder);
+            _monitorCardOrder.RemoveAt(currentIndex);
+            _monitorCardOrder.Insert(destinationIndex, stableKey);
+            SaveMonitorCardOrder();
+            _monitorCardOrderBeforeDrag.Clear();
+            _monitorCardAnimationTimer.Start();
+            focusControl.Focus();
+        }
+
+        private void BeginMonitorCardDrag(string stableKey, Control surface, MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Left ||
+                _monitorCardOrder.Count < 2 ||
+                _displayActionGate.CurrentCount == 0 ||
+                !_controlsByKey.TryGetValue(stableKey, out var controls) ||
+                controls.Card.IsDisposed)
+            {
+                return;
+            }
+
+            CancelMonitorCardDrag();
+            _draggedMonitorKey = stableKey;
+            _monitorCardDragCapture = surface;
+            _monitorCardDragStartScreen = surface.PointToScreen(e.Location);
+            _monitorCardLastPointerScreen = _monitorCardDragStartScreen;
+            _monitorCardDragPointerOffsetY = _monitorCardDragStartScreen.Y -
+                                             controls.Card.PointToScreen(Point.Empty).Y;
+            _monitorCardOrderBeforeDrag.Clear();
+            _monitorCardOrderBeforeDrag.AddRange(_monitorCardOrder);
+            surface.Capture = true;
+        }
+
+        private void UpdateMonitorCardDrag(string stableKey, Control surface, MouseEventArgs e)
+        {
+            if (!string.Equals(stableKey, _draggedMonitorKey, StringComparison.OrdinalIgnoreCase) ||
+                !ReferenceEquals(surface, _monitorCardDragCapture) ||
+                (e.Button & MouseButtons.Left) == 0 ||
+                !_controlsByKey.TryGetValue(stableKey, out var controls) ||
+                controls.Card.IsDisposed)
+            {
+                return;
+            }
+
+            var pointerScreen = surface.PointToScreen(e.Location);
+            _monitorCardLastPointerScreen = pointerScreen;
+            if (!_monitorCardDragActive)
+            {
+                var dragSize = SystemInformation.DragSize;
+                if (Math.Abs(pointerScreen.X - _monitorCardDragStartScreen.X) < dragSize.Width / 2 &&
+                    Math.Abs(pointerScreen.Y - _monitorCardDragStartScreen.Y) < dragSize.Height / 2)
+                {
+                    return;
+                }
+
+                _monitorCardDragActive = true;
+                controls.Card.BorderColor = (_uiSettings.DarkMode ? ThemePalette.Dark() : ThemePalette.Light()).Accent;
+                controls.Card.Invalidate();
+                controls.Card.BringToFront();
+            }
+
+            PositionDraggedMonitorCard(stableKey, controls, pointerScreen);
+            _monitorCardAnimationTimer.Start();
+        }
+
+        private void PositionDraggedMonitorCard(
+            string stableKey,
+            MonitorControls controls,
+            Point pointerScreen)
+        {
+            AutoScrollMonitorCards(pointerScreen.Y);
+            var pointerClient = PointToClient(pointerScreen);
+            int firstSlotTop = GetRowsStartY() + AutoScrollPosition.Y;
+            int lastSlotTop = firstSlotTop + ((_monitorCardOrder.Count - 1) * RowVerticalGap);
+            int draggedTop = Math.Clamp(
+                pointerClient.Y - _monitorCardDragPointerOffsetY,
+                firstSlotTop,
+                lastSlotTop);
+            controls.Card.Top = draggedTop;
+
+            int destinationIndex = Math.Clamp(
+                (int)Math.Round(
+                    (draggedTop - firstSlotTop) / (double)RowVerticalGap,
+                    MidpointRounding.AwayFromZero),
+                0,
+                _monitorCardOrder.Count - 1);
+            int currentIndex = _monitorCardOrder.FindIndex(
+                key => key.Equals(stableKey, StringComparison.OrdinalIgnoreCase));
+            if (currentIndex >= 0 && currentIndex != destinationIndex)
+            {
+                _monitorCardOrder.RemoveAt(currentIndex);
+                _monitorCardOrder.Insert(destinationIndex, stableKey);
+            }
+        }
+
+        private void EndMonitorCardDrag(string stableKey, Control surface, MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Left ||
+                !string.Equals(stableKey, _draggedMonitorKey, StringComparison.OrdinalIgnoreCase) ||
+                !ReferenceEquals(surface, _monitorCardDragCapture))
+            {
+                return;
+            }
+
+            FinishMonitorCardDrag(saveOrder: _monitorCardDragActive);
+        }
+
+        private void FinishMonitorCardDrag(bool saveOrder)
+        {
+            if (_endingMonitorCardDrag)
+                return;
+
+            _endingMonitorCardDrag = true;
+            try
+            {
+                var draggedKey = _draggedMonitorKey;
+                var capture = _monitorCardDragCapture;
+                _draggedMonitorKey = null;
+                _monitorCardDragCapture = null;
+                _monitorCardDragActive = false;
+                if (capture != null)
+                    capture.Capture = false;
+
+                if (!string.IsNullOrWhiteSpace(draggedKey) &&
+                    _controlsByKey.TryGetValue(draggedKey, out var controls) &&
+                    !controls.Card.IsDisposed)
+                {
+                    controls.Card.BorderColor = (_uiSettings.DarkMode ? ThemePalette.Dark() : ThemePalette.Light()).Border;
+                    controls.Card.Invalidate();
+                }
+
+                if (saveOrder && !_monitorCardOrder.SequenceEqual(
+                        _monitorCardOrderBeforeDrag,
+                        StringComparer.OrdinalIgnoreCase))
+                {
+                    SaveMonitorCardOrder();
+                }
+
+                _monitorCardAnimationTimer.Start();
+            }
+            finally
+            {
+                _monitorCardOrderBeforeDrag.Clear();
+                _endingMonitorCardDrag = false;
+            }
+        }
+
+        private void CancelMonitorCardDrag()
+        {
+            _monitorCardAnimationTimer.Stop();
+            if (_draggedMonitorKey == null && _monitorCardDragCapture == null)
+                return;
+
+            FinishMonitorCardDrag(saveOrder: false);
+            _monitorCardAnimationTimer.Stop();
+        }
+
+        private void SaveMonitorCardOrder()
+        {
+            var previousOrders = _aliasMap.ToDictionary(
+                pair => pair.Key,
+                pair => pair.Value.PreferredOrder,
+                StringComparer.OrdinalIgnoreCase);
+            if (!MonitorOrderService.TryApplyVisibleOrder(_aliasMap, _monitorCardOrder, out var validationError))
+            {
+                RestoreMonitorOrders(previousOrders);
+                RestoreMonitorCardOrderAfterSaveFailure(validationError);
+                return;
+            }
+
+            var saveResult = _aliasStore.SaveWithResult(_aliasMap);
+            LogPersistenceResult("save dragged monitor order", saveResult);
+            if (!saveResult.Success)
+            {
+                RestoreMonitorOrders(previousOrders);
+                RestoreMonitorCardOrderAfterSaveFailure(saveResult.ErrorMessage);
+                return;
+            }
+
+            _log.Write($"Saved monitor card order: {string.Join(", ", _monitorCardOrder)}.");
+        }
+
+        private void RestoreMonitorOrders(IReadOnlyDictionary<string, int?> previousOrders)
+        {
+            foreach (var pair in previousOrders)
+            {
+                if (_aliasMap.TryGetValue(pair.Key, out var info))
+                    info.PreferredOrder = pair.Value;
+            }
+        }
+
+        private void RestoreMonitorCardOrderAfterSaveFailure(string errorMessage)
+        {
+            _monitorCardOrder.Clear();
+            _monitorCardOrder.AddRange(_monitorCardOrderBeforeDrag);
+            ThemedMessageBox.Warn(
+                this,
+                $"The monitor order could not be saved. {errorMessage}",
+                "Reorder Monitors",
+                _uiSettings.DarkMode);
+        }
+
+        private void AnimateMonitorCards()
+        {
+            if (IsDisposed || _monitorCardOrder.Count == 0)
+            {
+                _monitorCardAnimationTimer.Stop();
+                return;
+            }
+
+            if (_monitorCardDragActive &&
+                !string.IsNullOrWhiteSpace(_draggedMonitorKey) &&
+                _controlsByKey.TryGetValue(_draggedMonitorKey, out var draggedControls) &&
+                !draggedControls.Card.IsDisposed)
+            {
+                PositionDraggedMonitorCard(
+                    _draggedMonitorKey,
+                    draggedControls,
+                    _monitorCardLastPointerScreen);
+            }
+
+            int firstSlotTop = GetRowsStartY() + AutoScrollPosition.Y;
+            bool moved = false;
+            for (int index = 0; index < _monitorCardOrder.Count; index++)
+            {
+                var stableKey = _monitorCardOrder[index];
+                if (_monitorCardDragActive &&
+                    stableKey.Equals(_draggedMonitorKey, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (!_controlsByKey.TryGetValue(stableKey, out var controls) || controls.Card.IsDisposed)
+                    continue;
+
+                int targetTop = firstSlotTop + (index * RowVerticalGap);
+                int difference = targetTop - controls.Card.Top;
+                if (difference == 0)
+                    continue;
+
+                int step = Math.Abs(difference) <= 2
+                    ? difference
+                    : Math.Sign(difference) * Math.Max(2, (int)Math.Ceiling(Math.Abs(difference) * 0.35));
+                controls.Card.Top += step;
+                moved = true;
+            }
+
+            if (!moved && !_monitorCardDragActive)
+                _monitorCardAnimationTimer.Stop();
+        }
+
+        private void AutoScrollMonitorCards(int pointerScreenY)
+        {
+            int edgeSize = ScaleLogical(44);
+            int scrollStep = ScaleLogical(20);
+            var pointerClient = PointToClient(new Point(PointToScreen(Point.Empty).X, pointerScreenY));
+            int currentScroll = Math.Max(0, -AutoScrollPosition.Y);
+            int maximumScroll = Math.Max(0, AutoScrollMinSize.Height - ClientSize.Height);
+            int requestedScroll = currentScroll;
+
+            if (pointerClient.Y < GetRowsStartY() + edgeSize)
+                requestedScroll = Math.Max(0, currentScroll - scrollStep);
+            else if (pointerClient.Y > ClientSize.Height - edgeSize)
+                requestedScroll = Math.Min(maximumScroll, currentScroll + scrollStep);
+
+            if (requestedScroll != currentScroll)
+                AutoScrollPosition = new Point(0, requestedScroll);
+        }
+
+        private string BuildMonitorDetailText(DetectedMonitor monitor)
+        {
+            var hasSavedAlias = _aliasMap.TryGetValue(monitor.StableKey, out var info) &&
+                                !string.IsNullOrWhiteSpace(info.Name);
+
+            if (hasSavedAlias && !string.IsNullOrWhiteSpace(monitor.Name))
+                return monitor.Name.Trim();
             if (!string.IsNullOrWhiteSpace(monitor.DeviceName))
                 return monitor.DeviceName.Replace(@"\\.\", string.Empty);
-            if (!string.IsNullOrWhiteSpace(monitor.Name))
-                return monitor.Name;
-            return monitor.IsPresent ? "Detected" : "Saved";
+            if (!string.IsNullOrWhiteSpace(monitor.SerialNumber))
+                return monitor.SerialNumber.Trim();
+            return "Detected";
+        }
+
+        private void ClearExistingMonitorPreferenceFlags(bool clearPreferred, bool clearFallback)
+        {
+            if (!clearPreferred && !clearFallback)
+                return;
+
+            foreach (var info in _aliasMap.Values)
+            {
+                if (clearPreferred)
+                    info.IsPreferredPrimary = false;
+                if (clearFallback)
+                    info.IsFallbackPrimary = false;
+            }
         }
 
         private static string BuildMonitorTooltipText(DetectedMonitor monitor)
@@ -2882,20 +3629,6 @@ namespace WorkMonitorSwitcher
 
                 try
                 {
-                    // Capture baseline layout before any primary-monitor topology change.
-                    if (_uiSettings.AutoSaveLayoutBeforeDisable)
-                    {
-                        var autoSave = await AutoSaveSelectedLayoutBeforeDisableAsync();
-                        if (!autoSave.Success)
-                        {
-                            _log.Write($"Disable stopped because automatic profile save was unsafe or failed: {autoSave.ErrorMessage}");
-                            ThemedMessageBox.Warn(this,
-                                autoSave.ErrorMessage,
-                                "Monitor Switcher", _uiSettings.DarkMode);
-                            return;
-                        }
-                    }
-
                     _lifetimeCancellation.Token.ThrowIfCancellationRequested();
 
                     CancelQueuedStartupLayoutRestore("disable monitor");
@@ -2907,12 +3640,18 @@ namespace WorkMonitorSwitcher
 
                     var disable = await DisableUsingTopologyAsync(
                         disablingDevice,
-                        selectedMonitor.NativeTargetPath,
-                        $"native disable {disablingDevice}");
+                        selectedMonitor.NativeTargetPath);
+                    if (!await HandleTopologyResultAsync(
+                            $"native disable {disablingDevice}",
+                            disable,
+                            "Monitor Switcher"))
+                    {
+                        return;
+                    }
                     if (!disable.Success)
                     {
                         ThemedMessageBox.Error(this,
-                            disable.ErrorMessage,
+                            $"Disable failed before the monitor could be deactivated. {disable.Message}",
                             "Monitor Switcher", _uiSettings.DarkMode);
                     }
                     else
@@ -2941,18 +3680,17 @@ namespace WorkMonitorSwitcher
             }
         }
 
-        private async Task<PrimaryDisableAttempt> DisableUsingTopologyAsync(
+        private async Task<DisplayTopologyResult> DisableUsingTopologyAsync(
             string disablingDevice,
-            string expectedDisableTargetPath,
-            string logAction)
+            string expectedDisableTargetPath)
         {
             var fallback = GetTopologyFallbackScreenForDisable(disablingDevice);
             if (fallback.DeviceName.Equals(disablingDevice, StringComparison.OrdinalIgnoreCase))
             {
-                return new PrimaryDisableAttempt
+                return new DisplayTopologyResult
                 {
                     Success = false,
-                    ErrorMessage = "Cannot disable the monitor because no fallback monitor is available."
+                    Message = "Cannot disable the monitor because no fallback monitor is available."
                 };
             }
 
@@ -2965,10 +3703,10 @@ namespace WorkMonitorSwitcher
             if (!NativeDisplayProfileCodec.IsStrongTargetPath(expectedDisableTargetPath) ||
                 !NativeDisplayProfileCodec.IsStrongTargetPath(fallbackTargetPath))
             {
-                return new PrimaryDisableAttempt
+                return new DisplayTopologyResult
                 {
                     Success = false,
-                    ErrorMessage =
+                    Message =
                         "Cannot disable the monitor because Windows did not provide unique physical identities for both affected displays."
                 };
             }
@@ -2977,16 +3715,8 @@ namespace WorkMonitorSwitcher
                 fallback.DeviceName,
                 expectedDisableTargetPath,
                 fallbackTargetPath!);
-            LogTopologyResult(logAction, result);
             await Task.Delay(700, _lifetimeCancellation.Token);
-
-            return new PrimaryDisableAttempt
-            {
-                Success = result.Success,
-                ErrorMessage = result.Success
-                    ? string.Empty
-                    : $"Disable failed before the monitor could be deactivated. {result.Message}"
-            };
+            return result;
         }
 
         private Screen GetTopologyFallbackScreenForDisable(string disablingDevice)
@@ -3055,7 +3785,13 @@ namespace WorkMonitorSwitcher
                 {
                     _lifetimeCancellation.Token.ThrowIfCancellationRequested();
                     var result = _topologySvc.EnableDisplay(currentTarget);
-                    LogTopologyResult($"native enable {stableKey}", result);
+                    if (!await HandleTopologyResultAsync(
+                            $"native enable {stableKey}",
+                            result,
+                            "Monitor Switcher"))
+                    {
+                        return;
+                    }
                     if (!result.Success)
                     {
                         ThemedMessageBox.Error(this,
@@ -3098,63 +3834,9 @@ namespace WorkMonitorSwitcher
         {
             await RefreshMonitorsAndUiAsync(allowDuringDisplayAction: true);
             _lifetimeCancellation.Token.ThrowIfCancellationRequested();
-            bool restoredLayout = false;
-            var profile = SelectedLayoutProfileName();
-            var path = SelectedLayoutPath();
-            var savedIdentities = LayoutIdentityStore.Load(path);
-            bool exactSavedSetActive = !_displayedDetectionUsedScreenFallback &&
-                                       File.Exists(path) &&
-                                       DisplayTopologyService.IsExactSavedMonitorSetActive(
-                                           path,
-                                           _detected,
-                                           savedIdentities);
-            if (exactSavedSetActive)
-            {
-                var result = await ApplySavedLayoutTopologyWithRetryAsync(
-                    profile,
-                    path,
-                    requireReliableDetection: true);
-                if (result.Success)
-                {
-                    _log.Write($"Auto-restored exact identity-matched layout profile '{profile}' after enable.");
-                    restoredLayout = true;
-                }
-                else
-                {
-                    _log.Write(
-                        result.RollbackAttempted && !result.RollbackVerified
-                            ? $"Auto-restore for layout profile '{profile}' failed and rollback could not be verified. No further topology action will run."
-                            : $"Auto-restore for layout profile '{profile}' failed; any attempted change was rolled back safely.");
-                }
-
-                await RefreshMonitorsAndUiAsync(allowDuringDisplayAction: true);
-                _lifetimeCancellation.Token.ThrowIfCancellationRequested();
-                if (result.RollbackAttempted && !result.RollbackVerified)
-                {
-                    ThemedMessageBox.Warn(this,
-                        result.Message,
-                        "Monitor Switcher", _uiSettings.DarkMode);
-                    return;
-                }
-            }
-            else
-            {
-                _log.Write(
-                    $"Auto-restore skipped after enable because the current active monitor set did not exactly match saved profile '{profile}' or detection was inconclusive.");
-            }
-
-            var primaryResult = await EnforcePrimaryMonitorOrderAsync(
-                allowAutomaticFallback: !restoredLayout);
-            if (HasUnverifiedRollback(primaryResult))
-            {
-                SurfaceUnverifiedTopology(primaryResult!, "Monitor Switcher");
-                return;
-            }
-            if (primaryResult?.Success == true)
-            {
-                await Task.Delay(400, _lifetimeCancellation.Token);
-                await RefreshMonitorsAndUiAsync(allowDuringDisplayAction: true);
-            }
+            _log.Write(
+                "Enable completed without applying profile geometry or preferred-primary settings; " +
+                "Windows Display Settings remains authoritative for arrangement.");
         }
 
         private async Task<MonitorActivityVerification> WaitForEnableDetectionAsync(
@@ -3254,6 +3936,13 @@ namespace WorkMonitorSwitcher
 
                     ctrls.DisableButton.Enabled = false;
                     ctrls.EnableButton.Enabled = false;
+                    const string busyDescription = "Monitor controls are unavailable while this monitor action is running.";
+                    ctrls.DisableButton.AccessibleDescription = busyDescription;
+                    ctrls.EnableButton.AccessibleDescription = busyDescription;
+                    ctrls.StatusLabel.AccessibleDescription = busyDescription;
+                    ctrls.Card.AccessibleDescription = busyDescription;
+                    _toolTip.SetToolTip(ctrls.DisableButton, busyDescription);
+                    _toolTip.SetToolTip(ctrls.EnableButton, busyDescription);
                     Themer.ApplyButtonStyle(ctrls.DisableButton, palette);
                     Themer.ApplyButtonStyle(ctrls.EnableButton, palette);
 
@@ -3268,95 +3957,98 @@ namespace WorkMonitorSwitcher
                     GetMonitorVisualStatus(isPresent, isActive),
                     palette);
 
-                bool canDisable = !_displayedDetectionUsedScreenFallback &&
+                bool canDisable = !_topologyActionsQuarantined &&
+                                  !_displayedDetectionUsedScreenFallback &&
                                   isPresent &&
                                   isActive &&
                                   activeCount > 1 &&
                                   NativeDisplayProfileCodec.IsStrongTargetPath(live?.NativeTargetPath);
-                bool canEnable = !_displayedDetectionUsedScreenFallback &&
+                bool canEnable = !_topologyActionsQuarantined &&
+                                 !_displayedDetectionUsedScreenFallback &&
                                  present.Count(d =>
                                      !d.IsActive &&
                                      d.StableKey.Equals(key, StringComparison.OrdinalIgnoreCase) &&
-                                     !string.IsNullOrWhiteSpace(d.NativeTargetPath)) == 1;
+                                     NativeDisplayProfileCodec.IsStrongTargetPath(d.NativeTargetPath)) == 1;
 
                 ctrls.DisableButton.Enabled = canDisable;
                 ctrls.EnableButton.Enabled = canEnable;
+                var disableDescription = canDisable
+                    ? $"Disable {ctrls.TitleLabel.Text}. At least one display remains active."
+                    : GetDisableUnavailableReason(isPresent, isActive, activeCount, live?.NativeTargetPath);
+                var enableDescription = canEnable
+                    ? $"Enable {ctrls.TitleLabel.Text} using its unique current Windows physical target."
+                    : GetEnableUnavailableReason(isPresent, isActive, live?.NativeTargetPath);
+                ctrls.DisableButton.AccessibleDescription = disableDescription;
+                ctrls.EnableButton.AccessibleDescription = enableDescription;
+                ctrls.StatusLabel.AccessibleName = $"{ctrls.TitleLabel.Text} status";
+                ctrls.StatusLabel.AccessibleDescription =
+                    $"{ctrls.TitleLabel.Text} is {ctrls.StatusLabel.Text.ToLowerInvariant()}.";
+                ctrls.Card.AccessibleName = $"Monitor {ctrls.TitleLabel.Text}";
+                ctrls.Card.AccessibleDescription =
+                    $"{ctrls.StatusLabel.AccessibleDescription} {disableDescription} {enableDescription}";
+                _toolTip.SetToolTip(ctrls.DisableButton, disableDescription);
+                _toolTip.SetToolTip(ctrls.EnableButton, enableDescription);
                 Themer.ApplyButtonStyle(ctrls.DisableButton, palette);
                 Themer.ApplyButtonStyle(ctrls.EnableButton, palette);
             }
+
+            UpdateProfileApplyButtonState();
         }
 
-
-        private async Task<DisplayTopologyResult?> EnforcePrimaryMonitorOrderAsync(bool allowAutomaticFallback)
+        private string GetDisableUnavailableReason(
+            bool isPresent,
+            bool isActive,
+            int activeCount,
+            string? targetPath)
         {
-            var preferredResult = await EnforcePreferredPrimaryIfActiveAsync("preferred primary");
-            if (preferredResult?.Success == true || HasUnverifiedRollback(preferredResult))
-                return preferredResult;
-
-            if (!allowAutomaticFallback)
-                return preferredResult;
-
-            var target = PrimaryMonitorPreference.ResolveLeftMostActiveTarget(_detected, _aliasMap);
-            if (!string.IsNullOrWhiteSpace(target))
-                return await SetPrimaryWithTopologyAsync(target, "left-most active primary");
-
-            return preferredResult;
+            if (_topologyActionsQuarantined)
+                return GetTopologyActionUnavailableReason();
+            if (_displayedDetectionUsedScreenFallback)
+                return "Disable is unavailable because physical monitor detection is currently degraded.";
+            if (!isPresent)
+                return "Disable is unavailable because this monitor is not currently connected.";
+            if (!isActive)
+                return "Disable is unavailable because this monitor is already disabled.";
+            if (activeCount <= 1)
+                return "Disable is unavailable because at least one monitor must remain active.";
+            if (!NativeDisplayProfileCodec.IsStrongTargetPath(targetPath))
+                return "Disable is unavailable because Windows did not provide a unique physical target.";
+            return "Disable is currently unavailable.";
         }
 
-        private async Task<DisplayTopologyResult?> EnforcePreferredPrimaryIfActiveAsync(string reason)
+        private string GetEnableUnavailableReason(bool isPresent, bool isActive, string? targetPath)
         {
-            var target = PrimaryMonitorPreference.ResolvePreferredPrimaryTarget(_detected, _aliasMap);
-            if (string.IsNullOrWhiteSpace(target))
-                return null;
-
-            return await SetPrimaryWithTopologyAsync(target, reason);
+            if (_topologyActionsQuarantined)
+                return GetTopologyActionUnavailableReason();
+            if (_displayedDetectionUsedScreenFallback)
+                return "Enable is unavailable because physical monitor detection is currently degraded.";
+            if (!isPresent)
+                return "Enable is unavailable because this monitor is not currently connected.";
+            if (isActive)
+                return "Enable is unavailable because this monitor is already active.";
+            if (!NativeDisplayProfileCodec.IsStrongTargetPath(targetPath))
+                return "Enable is unavailable because Windows did not provide a unique physical target.";
+            return "Enable is unavailable because the monitor identity is ambiguous.";
         }
-
-        private Task<DisplayTopologyResult> SetPrimaryWithTopologyAsync(string target, string reason)
-        {
-            var targetMatches = _detected
-                .Where(monitor =>
-                    monitor.IsPresent &&
-                    monitor.IsActive &&
-                    MonitorTargetResolver.TargetsEquivalent(monitor.DeviceName, target) &&
-                    NativeDisplayProfileCodec.IsStrongTargetPath(monitor.NativeTargetPath))
-                .ToList();
-            if (_displayedDetectionUsedScreenFallback || targetMatches.Count != 1)
-            {
-                _log.Write(
-                    $"Skipped set primary ({reason}); '{target}' did not resolve to one reliably detected physical display.");
-                return Task.FromResult(new DisplayTopologyResult
-                {
-                    Success = false,
-                    Message =
-                        $"'{target}' did not resolve to one reliably detected physical display; no primary-display change was made."
-                });
-            }
-
-            _lifetimeCancellation.Token.ThrowIfCancellationRequested();
-            var result = _topologySvc.SetPrimaryDisplay(target, targetMatches[0].NativeTargetPath);
-            LogTopologyResult($"CCD set primary ({reason})", result);
-            return Task.FromResult(result);
-        }
-
         private static bool HasUnverifiedRollback(DisplayTopologyResult? result)
             => result?.RollbackAttempted == true && !result.RollbackVerified;
 
         private void SurfaceUnverifiedTopology(DisplayTopologyResult result, string title)
         {
-            _log.Write(result.Message);
+            var message = string.IsNullOrWhiteSpace(result.Message)
+                ? GetTopologyActionUnavailableReason()
+                : $"{result.Message}\n\n{GetTopologyActionUnavailableReason()}";
+            _log.Write(message.Replace(Environment.NewLine, " "));
             if (IsNormalVisible)
             {
-                ThemedMessageBox.Warn(this, result.Message, title, _uiSettings.DarkMode);
+                ThemedMessageBox.Warn(this, message, title, _uiSettings.DarkMode);
                 return;
             }
 
             _trayIcon?.ShowBalloonTip(
                 5000,
                 "Monitor Switcher",
-                string.IsNullOrWhiteSpace(result.Message)
-                    ? "A display rollback could not be verified. Open Windows Display Settings before another monitor action."
-                    : result.Message,
+                "A display rollback could not be verified. Monitor actions are paused until a reliable refresh completes.",
                 ToolTipIcon.Warning);
         }
 
@@ -3392,28 +4084,104 @@ namespace WorkMonitorSwitcher
         private KeyValuePair<string, MonitorInfo>? FindUniqueAliasMatch(DetectedMonitor m, HashSet<string> detectedKeys)
         {
             // Only consider aliases that are NOT currently detected, to avoid swaps.
-            IEnumerable<KeyValuePair<string, MonitorInfo>> candidates = _aliasMap
-                .Where(kv => !detectedKeys.Contains(kv.Key));
+            var candidates = _aliasMap
+                .Where(kv => !detectedKeys.Contains(kv.Key))
+                .ToList();
 
-            KeyValuePair<string, MonitorInfo>? TryMatch(Func<MonitorInfo, string?> selector, string? value)
-            {
-                if (string.IsNullOrWhiteSpace(value)) return null;
-                var matches = candidates
-                    .Where(kv => StringsEqual(selector(kv.Value), value))
-                    .ToList();
-                return matches.Count == 1 ? matches[0] : null;
-            }
+            var physicalMatch = FindUniquePhysicalAliasMatch(m, candidates);
+            if (physicalMatch != null) return physicalMatch;
 
-            var match = TryMatch(i => i.LastSerialNumber, m.SerialNumber);
-            if (match != null) return match;
-
-            match = TryMatch(i => i.LastInstanceId, m.InstanceId);
-            if (match != null) return match;
-
-            match = TryMatch(i => i.LastRegistryKey, m.MonitorKey);
-            if (match != null) return match;
+            var legacyDriverMatch = FindUniqueLegacyDriverAliasMatch(m, _detected, candidates);
+            if (legacyDriverMatch != null) return legacyDriverMatch;
 
             return null;
+        }
+
+        internal static KeyValuePair<string, MonitorInfo>? FindUniquePhysicalAliasMatch(
+            DetectedMonitor monitor,
+            IEnumerable<KeyValuePair<string, MonitorInfo>> candidates)
+        {
+            var available = candidates.ToList();
+            var strongMatches = available
+                .Where(candidate => HasCorroboratingAliasIdentity(candidate.Value, monitor))
+                .Take(2)
+                .ToList();
+            if (strongMatches.Count == 1)
+                return strongMatches[0];
+
+            // Serial identity is deliberately not a final fallback. A current-snapshot
+            // serial can be shared by a physically disconnected peer, so legitimate
+            // legacy SN -> IID migration must be corroborated above by the CCD target,
+            // PnP instance, or registry monitor identity.
+            return null;
+        }
+
+        private static bool HasCorroboratingAliasIdentity(MonitorInfo info, DetectedMonitor monitor)
+        {
+            bool matched = false;
+
+            if (!string.IsNullOrWhiteSpace(monitor.InstanceId) &&
+                !string.IsNullOrWhiteSpace(info.LastInstanceId))
+            {
+                if (!StringsEqual(info.LastInstanceId, monitor.InstanceId))
+                    return false;
+                matched = true;
+            }
+            if (!string.IsNullOrWhiteSpace(monitor.MonitorKey) &&
+                !string.IsNullOrWhiteSpace(info.LastRegistryKey))
+            {
+                if (!StringsEqual(info.LastRegistryKey, monitor.MonitorKey))
+                    return false;
+                matched = true;
+            }
+
+            if (NativeDisplayProfileCodec.IsStrongTargetPath(monitor.NativeTargetPath) &&
+                NativeDisplayProfileCodec.IsStrongTargetPath(info.LastNativeTargetPath))
+            {
+                if (!NativeDisplayProfileCodec.NormaliseTargetPath(info.LastNativeTargetPath)
+                        .Equals(
+                            NativeDisplayProfileCodec.NormaliseTargetPath(monitor.NativeTargetPath),
+                            StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+                matched = true;
+            }
+
+            return matched;
+        }
+
+        internal static KeyValuePair<string, MonitorInfo>? FindUniqueLegacyDriverAliasMatch(
+            DetectedMonitor monitor,
+            IReadOnlyCollection<DetectedMonitor> detected,
+            IEnumerable<KeyValuePair<string, MonitorInfo>> candidates)
+        {
+            if (!NativeDisplayDetection.TryNormalizeDriverSoftwareKey(
+                    monitor.DriverRegistryKey,
+                    out var currentDriverKey))
+            {
+                return null;
+            }
+
+            var currentMatches = detected.Count(candidate =>
+                NativeDisplayDetection.TryNormalizeDriverSoftwareKey(
+                    candidate.DriverRegistryKey,
+                    out var candidateDriverKey) &&
+                candidateDriverKey.Equals(currentDriverKey, StringComparison.OrdinalIgnoreCase));
+            if (currentMatches != 1)
+                return null;
+
+            var legacyMatches = candidates
+                .Where(candidate => candidate.Key.TrimStart().StartsWith("MK:", StringComparison.OrdinalIgnoreCase))
+                .Where(candidate =>
+                    NativeDisplayDetection.TryNormalizeDriverSoftwareKey(
+                        candidate.Key,
+                        out var legacyDriverKey) &&
+                    legacyDriverKey.Equals(currentDriverKey, StringComparison.OrdinalIgnoreCase))
+                .Take(2)
+                .ToList();
+
+            return legacyMatches.Count == 1 ? legacyMatches[0] : null;
         }
 
         private void RemoveShadowedDeviceAliases()
@@ -3553,7 +4321,8 @@ namespace WorkMonitorSwitcher
                    string.IsNullOrWhiteSpace(info.LastSerialNumber) &&
                    string.IsNullOrWhiteSpace(info.LastInstanceId) &&
                    string.IsNullOrWhiteSpace(info.LastRegistryKey) &&
-                   string.IsNullOrWhiteSpace(info.LastMonitorId);
+                   string.IsNullOrWhiteSpace(info.LastMonitorId) &&
+                   string.IsNullOrWhiteSpace(info.LastNativeTargetPath);
         }
 
         private static string NormalizeDeviceNameForComparison(string? value)
@@ -3588,6 +4357,9 @@ namespace WorkMonitorSwitcher
             target.LastSerialNumber = FirstNonBlank(target.LastSerialNumber, source.LastSerialNumber);
             target.LastInstanceId = FirstNonBlank(target.LastInstanceId, source.LastInstanceId);
             target.LastMonitorId = FirstNonBlank(target.LastMonitorId, source.LastMonitorId);
+            target.LastNativeTargetPath = FirstNonBlank(
+                target.LastNativeTargetPath,
+                source.LastNativeTargetPath);
 
             foreach (var raw in source.KnownTargets)
             {
@@ -3659,12 +4431,21 @@ namespace WorkMonitorSwitcher
                 : stableKey;
         }
 
-        private void SetAlias(string stableKey, string alias)
+        private string GetPresentationTitle(DetectedMonitor monitor)
         {
-            if (!_aliasMap.TryGetValue(stableKey, out var info))
-                info = new MonitorInfo();
-            info.Name = alias;
-            _aliasMap[stableKey] = info;
+            if (_aliasMap.TryGetValue(monitor.StableKey, out var info) &&
+                !string.IsNullOrWhiteSpace(info.Name))
+            {
+                return info.Name.Trim();
+            }
+
+            if (!string.IsNullOrWhiteSpace(monitor.Name))
+                return monitor.Name.Trim();
+
+            if (!string.IsNullOrWhiteSpace(monitor.DeviceName))
+                return monitor.DeviceName.Replace(@"\\.\", string.Empty);
+
+            return "Detected monitor";
         }
 
         private void LogDetectionSnapshotIfChanged()
@@ -3788,8 +4569,9 @@ namespace WorkMonitorSwitcher
     }
 
     // Small UI handle bag (no logic)
-    public class MonitorControls
+    internal sealed class MonitorControls
     {
+        public ThemedCardPanel Card { get; set; } = new();
         public Button DisableButton { get; set; } = new();
         public Button EnableButton { get; set; } = new();
         public Label StatusLabel { get; set; } = new();

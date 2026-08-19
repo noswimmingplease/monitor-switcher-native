@@ -20,6 +20,26 @@ namespace WorkMonitorSwitcher.Services
         int Width,
         int Height);
 
+    internal sealed record ActiveDisplayGeometry(
+        string TargetPath,
+        string DeviceName,
+        int X,
+        int Y,
+        int Width,
+        int Height,
+        uint Rotation,
+        bool IsPrimary);
+
+    internal sealed record SavedProfileMembershipResolution(
+        bool Success,
+        IReadOnlyList<DetectedMonitor> PresentSavedMonitors,
+        int UnavailableSavedMonitorCount,
+        string ErrorMessage)
+    {
+        public static SavedProfileMembershipResolution Failed(string message)
+            => new(false, Array.Empty<DetectedMonitor>(), 0, message);
+    }
+
     internal enum SavedLayoutAppliedState
     {
         Applied,
@@ -233,21 +253,20 @@ namespace WorkMonitorSwitcher.Services
                     .Append(selectedPath.MonitorDevicePath)
                     .ToList();
 
-                var activation = ActivateTopology(requested, expectedTargets);
+                var activation = ActivateTopology(requested, expectedTargets, original);
                 topologyMayHaveChanged = activation.ApplyCode == ErrorSuccess;
                 if (!activation.Success)
                     return topologyMayHaveChanged
                         ? WithRollbackDetails(activation, original)
                         : activation;
 
-                var persistence = PersistEnabledTopology(
-                    original,
-                    selectedPath.MonitorDevicePath,
-                    $"Enabled native display '{selectedPath.TargetFriendlyName}'.");
-                if (persistence.Success)
-                    return persistence;
-
-                return WithRollbackDetails(persistence, original);
+                return new DisplayTopologyResult
+                {
+                    Success = true,
+                    ValidateCode = activation.ValidateCode,
+                    ApplyCode = activation.ApplyCode,
+                    Message = $"Enabled native display '{selectedPath.TargetFriendlyName}' using a Windows-managed arrangement."
+                };
             }
             catch (Exception ex)
             {
@@ -259,9 +278,9 @@ namespace WorkMonitorSwitcher.Services
         }
 
         /// <summary>
-        /// Explicitly restores the exact target set and geometry in a native
-        /// profile. Unlike ApplyLayoutPositionsFromConfig, this method may activate
-        /// and deactivate targets and must not be used by automatic reconnect work.
+        /// Applies only the exact active target set from a native profile. Source
+        /// modes, positions, rotation and primary selection come from Windows'
+        /// persistence database and are never read from the profile here.
         /// </summary>
         public DisplayTopologyResult RestoreExactDisplaySetFromConfig(
             string layoutPath,
@@ -295,6 +314,23 @@ namespace WorkMonitorSwitcher.Services
                 if (!targetResolution.Success)
                     return Failure(targetResolution.ErrorMessage);
 
+                var requestedTargets = GetProfileMonitorSet(
+                    profile,
+                    targetResolution.TargetPathByLayoutDevice);
+                var currentTargets = original.Entries
+                    .Select(entry => NativeDisplayProfileCodec.NormaliseTargetPath(entry.MonitorDevicePath))
+                    .ToList();
+                if (currentTargets.Count == requestedTargets.Count &&
+                    currentTargets.Distinct(StringComparer.OrdinalIgnoreCase).Count() == currentTargets.Count &&
+                    requestedTargets.SetEquals(currentTargets))
+                {
+                    return new DisplayTopologyResult
+                    {
+                        Success = true,
+                        Message = "The requested monitor set is already active; Windows' arrangement was left unchanged."
+                    };
+                }
+
                 var requests = profile.Monitors.Select(monitor => new NativePathRequest(
                     targetResolution.TargetPathByLayoutDevice[monitor.LayoutDeviceName],
                     monitor.SourceAdapterLuid!.Value,
@@ -305,85 +341,41 @@ namespace WorkMonitorSwitcher.Services
                 if (!selection.Success)
                     return Failure(selection.ErrorMessage);
 
-                var primary = profile.Monitors.Single(monitor => monitor.IsPrimary);
                 var selectedByTarget = selection.Paths.ToDictionary(
                     path => NativeDisplayProfileCodec.NormaliseTargetPath(path.MonitorDevicePath),
                     StringComparer.OrdinalIgnoreCase);
-                var orderedCandidates = profile.Monitors
-                    .OrderBy(monitor => monitor.IsPrimary ? 0 : 1)
-                    .ThenBy(monitor => monitor.X)
-                    .ThenBy(monitor => monitor.Y)
-                    .Select(monitor => selectedByTarget[
-                        NativeDisplayProfileCodec.NormaliseTargetPath(
-                            targetResolution.TargetPathByLayoutDevice[monitor.LayoutDeviceName])])
+                var currentOrder = original.Entries
+                    .Select((entry, index) => new
+                    {
+                        Target = NativeDisplayProfileCodec.NormaliseTargetPath(entry.MonitorDevicePath),
+                        Index = index
+                    })
+                    .ToDictionary(item => item.Target, item => item.Index, StringComparer.OrdinalIgnoreCase);
+                var orderedCandidates = selectedByTarget.Values
+                    .OrderBy(candidate => currentOrder.TryGetValue(
+                        NativeDisplayProfileCodec.NormaliseTargetPath(candidate.MonitorDevicePath),
+                        out var index) ? index : int.MaxValue)
+                    .ThenBy(candidate => candidate.PathIndex)
                     .ToList();
                 var requestedPaths = orderedCandidates
                     .Select(candidate => allPaths.Entries.Single(entry => entry.PathIndex == candidate.PathIndex).Path)
                     .ToArray();
                 var expectedTargets = orderedCandidates.Select(candidate => candidate.MonitorDevicePath).ToList();
 
-                var activation = ActivateTopology(requestedPaths, expectedTargets);
+                var activation = ActivateTopology(requestedPaths, expectedTargets, original);
                 topologyMayHaveChanged = activation.ApplyCode == ErrorSuccess;
                 if (!activation.Success)
                     return topologyMayHaveChanged
                         ? WithRollbackDetails(activation, original)
                         : activation;
 
-                var active = QueryActiveTopology();
-                var activeByTarget = active.Entries
-                    .GroupBy(entry => NativeDisplayProfileCodec.NormaliseTargetPath(entry.MonitorDevicePath),
-                        StringComparer.OrdinalIgnoreCase)
-                    .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.OrdinalIgnoreCase);
-                if (activeByTarget.Count != profile.Monitors.Count ||
-                    activeByTarget.Values.Any(entries => entries.Count != 1))
+                return new DisplayTopologyResult
                 {
-                    return WithRollbackDetails(
-                        Failure("The activated display set was not an unambiguous extended desktop."),
-                        original);
-                }
-
-                var entryByMonitor = new Dictionary<NativeDisplayProfileMonitor, PathEntry>();
-                foreach (var monitor in profile.Monitors)
-                {
-                    var targetPath = NativeDisplayProfileCodec.NormaliseTargetPath(
-                        targetResolution.TargetPathByLayoutDevice[monitor.LayoutDeviceName]);
-                    if (!activeByTarget.TryGetValue(targetPath, out var entries) || entries.Count != 1)
-                    {
-                        return WithRollbackDetails(
-                            Failure($"Saved target '{monitor.LayoutDeviceName}' was not active after topology activation."),
-                            original);
-                    }
-                    entryByMonitor[monitor] = entries[0];
-                }
-
-                var positions = entryByMonitor.ToDictionary(
-                    pair => pair.Value.SourceModeIndex,
-                    pair => new DisplayPosition(pair.Key.X, pair.Key.Y));
-                var sizes = entryByMonitor.ToDictionary(
-                    pair => pair.Value.SourceModeIndex,
-                    pair => new DisplaySize(pair.Key.Width, pair.Key.Height));
-                var rotations = entryByMonitor.ToDictionary(
-                    pair => pair.Value.SourceModeIndex,
-                    pair => pair.Key.Rotation);
-                var sourceNames = entryByMonitor.ToDictionary(
-                    pair => pair.Value.SourceModeIndex,
-                    pair => pair.Key.LayoutDeviceName);
-                var orderedEntries = profile.Monitors
-                    .OrderBy(monitor => monitor.IsPrimary ? 0 : 1)
-                    .ThenBy(monitor => monitor.X)
-                    .ThenBy(monitor => monitor.Y)
-                    .Select(monitor => entryByMonitor[monitor])
-                    .ToList();
-
-                var geometry = ValidateAndApply(
-                    active,
-                    orderedEntries,
-                    positions,
-                    $"Restored native display profile '{Path.GetFileName(layoutPath)}'.",
-                    sizes,
-                    rotations,
-                    sourceNames);
-                return geometry.Success ? geometry : WithRollbackDetails(geometry, original);
+                    Success = true,
+                    ValidateCode = activation.ValidateCode,
+                    ApplyCode = activation.ApplyCode,
+                    Message = $"Applied monitor set '{Path.GetFileName(layoutPath)}' using a Windows-managed arrangement."
+                };
             }
             catch (Exception ex)
             {
@@ -392,6 +384,21 @@ namespace WorkMonitorSwitcher.Services
                     ? WithRollbackDetails(failure, original)
                     : failure;
             }
+        }
+
+        internal static HashSet<string> GetProfileMonitorSet(
+            NativeDisplayProfile profile,
+            IReadOnlyDictionary<string, string> resolvedTargetPaths)
+        {
+            if (profile == null)
+                throw new ArgumentNullException(nameof(profile));
+            if (resolvedTargetPaths == null)
+                throw new ArgumentNullException(nameof(resolvedTargetPaths));
+
+            return profile.Monitors
+                .Select(monitor => resolvedTargetPaths[monitor.LayoutDeviceName])
+                .Select(NativeDisplayProfileCodec.NormaliseTargetPath)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
         }
 
         private static bool TryValidateExtendedDesktop(
@@ -493,7 +500,8 @@ namespace WorkMonitorSwitcher.Services
 
         private static DisplayTopologyResult ActivateTopology(
             DISPLAYCONFIG_PATH_INFO[] requestedPaths,
-            IReadOnlyCollection<string> expectedTargetPaths)
+            IReadOnlyCollection<string> expectedTargetPaths,
+            TopologySnapshot original)
         {
             if (requestedPaths.Length == 0 || expectedTargetPaths.Count == 0)
                 return Failure("No display path was selected for activation.");
@@ -568,9 +576,17 @@ namespace WorkMonitorSwitcher.Services
                     var actual = active.Entries
                         .Select(entry => NativeDisplayProfileCodec.NormaliseTargetPath(entry.MonitorDevicePath))
                         .ToList();
-                    if (actual.Count == expected.Count &&
-                        actual.Distinct(StringComparer.OrdinalIgnoreCase).Count() == actual.Count &&
-                        expected.SetEquals(actual))
+                    bool exactTargetSet = actual.Count == expected.Count &&
+                                          actual.Distinct(StringComparer.OrdinalIgnoreCase).Count() == actual.Count &&
+                                          expected.SetEquals(actual);
+                    IReadOnlyList<string> geometryIssues = Array.Empty<string>();
+                    bool retainedGeometryVerified = exactTargetSet &&
+                        TryVerifyRetainedDisplayGeometry(
+                            original.Entries.Select(ToGeometry).ToList(),
+                            active.Entries.Select(ToGeometry).ToList(),
+                            expected,
+                            out geometryIssues);
+                    if (retainedGeometryVerified)
                     {
                         return new DisplayTopologyResult
                         {
@@ -581,12 +597,14 @@ namespace WorkMonitorSwitcher.Services
                         };
                     }
 
-                    verification = actual
-                        .Where(path => !expected.Contains(path))
-                        .Select(path => $"Unexpected active target: {path}.")
-                        .Concat(expected.Where(path => !actual.Contains(path, StringComparer.OrdinalIgnoreCase))
-                            .Select(path => $"Expected target is inactive: {path}."))
-                        .ToList();
+                    verification = exactTargetSet
+                        ? geometryIssues
+                        : actual
+                            .Where(path => !expected.Contains(path))
+                            .Select(path => $"Unexpected active target: {path}.")
+                            .Concat(expected.Where(path => !actual.Contains(path, StringComparer.OrdinalIgnoreCase))
+                                .Select(path => $"Expected target is inactive: {path}."))
+                            .ToList();
                 }
                 catch (Exception ex)
                 {
@@ -602,73 +620,139 @@ namespace WorkMonitorSwitcher.Services
                 Success = false,
                 ValidateCode = validateCode,
                 ApplyCode = applyCode,
-                Message = "Native activation returned success, but exact target-set verification failed.",
+                Message = "Native activation returned success, but target-set or retained-arrangement verification failed.",
                 Details = verification
             };
         }
 
-        private static DisplayTopologyResult PersistEnabledTopology(
-            TopologySnapshot original,
-            string enabledTargetPath,
-            string successMessage)
+        private static ActiveDisplayGeometry ToGeometry(PathEntry entry)
+            => new(
+                NativeDisplayProfileCodec.NormaliseTargetPath(entry.MonitorDevicePath),
+                entry.Name,
+                entry.X,
+                entry.Y,
+                entry.Width,
+                entry.Height,
+                entry.Rotation,
+                entry.X == 0 && entry.Y == 0);
+
+        internal static bool TryVerifyRetainedDisplayGeometry(
+            IReadOnlyCollection<ActiveDisplayGeometry> original,
+            IReadOnlyCollection<ActiveDisplayGeometry> actual,
+            IReadOnlyCollection<string> requestedTargetPaths,
+            out IReadOnlyList<string> discrepancies)
         {
-            var current = QueryActiveTopology();
-            if (current.Entries.Any(entry =>
-                    !entry.IsAvailable ||
-                    !NativeDisplayProfileCodec.IsStrongTargetPath(entry.MonitorDevicePath)) ||
-                current.Entries.Select(entry =>
-                        NativeDisplayProfileCodec.NormaliseTargetPath(entry.MonitorDevicePath))
-                    .Distinct(StringComparer.OrdinalIgnoreCase).Count() != current.Entries.Count ||
-                current.Entries.Select(entry =>
-                        (ToInt64(entry.Path.sourceInfo.adapterId), entry.Path.sourceInfo.id))
-                    .Distinct().Count() != current.Entries.Count)
+            if (original == null)
+                throw new ArgumentNullException(nameof(original));
+            if (actual == null)
+                throw new ArgumentNullException(nameof(actual));
+            if (requestedTargetPaths == null)
+                throw new ArgumentNullException(nameof(requestedTargetPaths));
+
+            var issues = new List<string>();
+            var requested = requestedTargetPaths
+                .Select(NativeDisplayProfileCodec.NormaliseTargetPath)
+                .Where(path => path.Length > 0)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var retained = original
+                .Where(entry => requested.Contains(
+                    NativeDisplayProfileCodec.NormaliseTargetPath(entry.TargetPath)))
+                .ToList();
+            var actualByTarget = actual
+                .GroupBy(
+                    entry => NativeDisplayProfileCodec.NormaliseTargetPath(entry.TargetPath),
+                    StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.OrdinalIgnoreCase);
+            if (actual.Count(entry => entry.IsPrimary) != 1)
+                issues.Add("The activated extended desktop does not contain exactly one primary display.");
+
+            foreach (var expected in retained)
             {
-                return Failure("The activated topology contains an unavailable, cloned, or ambiguous target.");
+                var target = NativeDisplayProfileCodec.NormaliseTargetPath(expected.TargetPath);
+                if (!actualByTarget.TryGetValue(target, out var matches) || matches.Count != 1)
+                {
+                    issues.Add($"Retained target '{target}' is not represented exactly once after activation.");
+                    continue;
+                }
+
+                var observed = matches[0];
+                if (observed.Rotation != expected.Rotation)
+                {
+                    issues.Add(
+                        $"Retained target '{target}' rotation is {observed.Rotation}; expected {expected.Rotation}.");
+                }
+                if (!EffectiveDisplaySizeMatches(
+                        new DisplaySize(observed.Width, observed.Height),
+                        new DisplaySize(expected.Width, expected.Height),
+                        expected.Rotation,
+                        allowQuarterTurnEquivalent: false))
+                {
+                    issues.Add(
+                        $"Retained target '{target}' effective size is {observed.Width}x{observed.Height}; " +
+                        $"expected {expected.Width}x{expected.Height}.");
+                }
             }
 
-            var originalByTarget = original.Entries.ToDictionary(
-                entry => NativeDisplayProfileCodec.NormaliseTargetPath(entry.MonitorDevicePath),
-                StringComparer.OrdinalIgnoreCase);
-            var primaryOriginal = original.Entries.Single(entry => entry.X == 0 && entry.Y == 0);
-            var primary = current.Entries.SingleOrDefault(entry =>
-                TargetPathEquals(entry.MonitorDevicePath, primaryOriginal.MonitorDevicePath));
-            var enabled = current.Entries.SingleOrDefault(entry =>
-                TargetPathEquals(entry.MonitorDevicePath, enabledTargetPath));
-            if (primary == null || enabled == null)
-                return Failure("The original primary or newly enabled target could not be resolved after activation.");
-
-            int rightEdge = original.Entries.Max(entry => checked(entry.X + entry.Width));
-            var positions = new Dictionary<int, DisplayPosition>();
-            foreach (var entry in current.Entries)
+            var retainedPrimary = retained.Where(entry => entry.IsPrimary).ToList();
+            if (retainedPrimary.Count > 0)
             {
-                var targetKey = NativeDisplayProfileCodec.NormaliseTargetPath(entry.MonitorDevicePath);
-                if (originalByTarget.TryGetValue(targetKey, out var originalEntry))
+                if (retainedPrimary.Count != 1)
                 {
-                    positions[entry.SourceModeIndex] = new DisplayPosition(originalEntry.X, originalEntry.Y);
-                }
-                else if (ReferenceEquals(entry, enabled))
-                {
-                    positions[entry.SourceModeIndex] = new DisplayPosition(rightEdge, 0);
+                    issues.Add("The captured retained topology did not contain one unambiguous primary display.");
                 }
                 else
                 {
-                    return Failure($"Unexpected target '{entry.MonitorDevicePath}' was active after native enable.");
+                    var primaryTarget = NativeDisplayProfileCodec.NormaliseTargetPath(retainedPrimary[0].TargetPath);
+                    if (!actualByTarget.TryGetValue(primaryTarget, out var primaryMatches) ||
+                        primaryMatches.Count != 1 ||
+                        !primaryMatches[0].IsPrimary)
+                    {
+                        issues.Add($"Retained primary target '{primaryTarget}' is no longer primary.");
+                    }
                 }
             }
 
-            var ordered = current.Entries
-                .OrderBy(entry => ReferenceEquals(entry, primary) ? 0 : 1)
-                .ThenBy(entry => positions[entry.SourceModeIndex].X)
-                .ThenBy(entry => positions[entry.SourceModeIndex].Y)
-                .ToList();
-            return ValidateAndApply(current, ordered, positions, successMessage);
+            for (int leftIndex = 0; leftIndex < retained.Count; leftIndex++)
+            {
+                var expectedLeft = retained[leftIndex];
+                var leftTarget = NativeDisplayProfileCodec.NormaliseTargetPath(expectedLeft.TargetPath);
+                if (!actualByTarget.TryGetValue(leftTarget, out var actualLeftMatches) || actualLeftMatches.Count != 1)
+                    continue;
+
+                for (int rightIndex = leftIndex + 1; rightIndex < retained.Count; rightIndex++)
+                {
+                    var expectedRight = retained[rightIndex];
+                    var rightTarget = NativeDisplayProfileCodec.NormaliseTargetPath(expectedRight.TargetPath);
+                    if (!actualByTarget.TryGetValue(rightTarget, out var actualRightMatches) || actualRightMatches.Count != 1)
+                        continue;
+
+                    long expectedDeltaX = (long)expectedRight.X - expectedLeft.X;
+                    long expectedDeltaY = (long)expectedRight.Y - expectedLeft.Y;
+                    long actualDeltaX = (long)actualRightMatches[0].X - actualLeftMatches[0].X;
+                    long actualDeltaY = (long)actualRightMatches[0].Y - actualLeftMatches[0].Y;
+                    if (Math.Abs(actualDeltaX - expectedDeltaX) > PositionNormalisationTolerancePixels ||
+                        Math.Abs(actualDeltaY - expectedDeltaY) > PositionNormalisationTolerancePixels)
+                    {
+                        issues.Add(
+                            $"Retained targets '{leftTarget}' and '{rightTarget}' moved relative to one another: " +
+                            $"offset is {actualDeltaX},{actualDeltaY}; expected {expectedDeltaX},{expectedDeltaY}.");
+                    }
+                }
+            }
+
+            discrepancies = issues;
+            return issues.Count == 0;
         }
 
         private static DisplayTopologyResult WithRollbackDetails(
             DisplayTopologyResult failure,
             TopologySnapshot original)
         {
-            var rollbackDetails = new List<string>(failure.Details);
+            const string restoredMessage = "The previous display topology was restored and verified.";
+            const string restoredDetail = "The original display topology was restored and verified after the failed operation.";
+            var rollbackDetails = failure.Details
+                .Where(detail => !detail.Equals(restoredDetail, StringComparison.Ordinal))
+                .ToList();
             bool rollbackVerified = false;
             try
             {
@@ -713,8 +797,7 @@ namespace WorkMonitorSwitcher.Services
                     if (verified)
                     {
                         rollbackVerified = true;
-                        rollbackDetails.Add(
-                            "The original display topology was restored and verified after the failed operation.");
+                        rollbackDetails.Add(restoredDetail);
                     }
                     else
                     {
@@ -730,6 +813,12 @@ namespace WorkMonitorSwitcher.Services
                 rollbackDetails.Add($"Rollback of the original display topology failed: {ex.Message}");
             }
 
+            var failureMessage = failure.Message.EndsWith(
+                    $" {restoredMessage}",
+                    StringComparison.Ordinal)
+                ? failure.Message[..^(restoredMessage.Length + 1)]
+                : failure.Message;
+
             return new DisplayTopologyResult
             {
                 Success = false,
@@ -738,8 +827,8 @@ namespace WorkMonitorSwitcher.Services
                 RollbackAttempted = true,
                 RollbackVerified = rollbackVerified,
                 Message = rollbackVerified
-                    ? $"{failure.Message} The previous display topology was restored and verified."
-                    : $"{failure.Message} Rollback could not be verified; refresh Windows Display Settings before another monitor action.",
+                    ? $"{failureMessage} {restoredMessage}"
+                    : $"{failureMessage} Rollback could not be verified; refresh Windows Display Settings before another monitor action.",
                 Details = rollbackDetails
             };
         }
@@ -849,7 +938,6 @@ namespace WorkMonitorSwitcher.Services
                 var identity = savedIdentity[0];
                 var identityMatches = ResolveNativeIdentityToDetected(
                     identity,
-                    savedIdentities,
                     presentDetected);
                 var matches = identityMatches
                     .Select(detected => detected.NativeTargetPath)
@@ -869,6 +957,77 @@ namespace WorkMonitorSwitcher.Services
             }
 
             return new TargetResolutionResult(true, resolved, string.Empty);
+        }
+
+        internal static SavedProfileMembershipResolution ResolveSavedProfileMembership(
+            string layoutPath,
+            IReadOnlyCollection<DetectedMonitor>? detectedMonitors,
+            IReadOnlyCollection<SavedLayoutIdentity>? savedIdentities)
+        {
+            if (string.IsNullOrWhiteSpace(layoutPath))
+                return SavedProfileMembershipResolution.Failed("No saved profile path was supplied.");
+            if (!NativeDisplayProfileCodec.TryRead(layoutPath, out var profile, out var profileError))
+                return SavedProfileMembershipResolution.Failed(profileError);
+            if (profile.Version != NativeDisplayProfileCodec.CurrentVersion ||
+                profile.Monitors.Any(monitor => !monitor.HasNativeRouteIdentity))
+            {
+                return SavedProfileMembershipResolution.Failed(
+                    "This profile has no complete current native display identity.");
+            }
+            if (detectedMonitors == null || savedIdentities == null ||
+                !HasExactNativeIdentityPair(profile, savedIdentities))
+            {
+                return SavedProfileMembershipResolution.Failed(
+                    "The profile has no complete matching physical identity map.");
+            }
+
+            var presentDetected = detectedMonitors
+                .Where(monitor => monitor.IsPresent &&
+                                  NativeDisplayProfileCodec.IsStrongTargetPath(monitor.NativeTargetPath))
+                .ToList();
+            var usedTargets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var resolved = new List<DetectedMonitor>();
+            int unavailable = 0;
+
+            foreach (var profileMonitor in profile.Monitors)
+            {
+                var identities = savedIdentities
+                    .Where(identity => DeviceNameEquals(
+                        GetIdentityLayoutDeviceName(identity),
+                        profileMonitor.LayoutDeviceName))
+                    .ToList();
+                if (identities.Count != 1)
+                {
+                    unavailable++;
+                    continue;
+                }
+
+                var matches = ResolveNativeIdentityToDetected(
+                        identities[0],
+                        presentDetected)
+                    .Where(monitor =>
+                        NativeDisplayProfileCodec.IsStrongTargetPath(monitor.NativeTargetPath) &&
+                        !usedTargets.Contains(NativeDisplayProfileCodec.NormaliseTargetPath(monitor.NativeTargetPath)))
+                    .GroupBy(
+                        monitor => NativeDisplayProfileCodec.NormaliseTargetPath(monitor.NativeTargetPath),
+                        StringComparer.OrdinalIgnoreCase)
+                    .Select(group => group.First())
+                    .ToList();
+                if (matches.Count != 1)
+                {
+                    unavailable++;
+                    continue;
+                }
+
+                usedTargets.Add(NativeDisplayProfileCodec.NormaliseTargetPath(matches[0].NativeTargetPath));
+                resolved.Add(matches[0]);
+            }
+
+            return new SavedProfileMembershipResolution(
+                true,
+                resolved,
+                unavailable,
+                string.Empty);
         }
 
         private static bool HasExactNativeIdentityPair(
@@ -1553,21 +1712,29 @@ namespace WorkMonitorSwitcher.Services
                 if (!DisplayPositionMatches(entry, position, requireExact: isPrimary))
                     return false;
 
-                var intendedRotation = rotations != null &&
-                                       rotations.TryGetValue(entry.SourceModeIndex, out var rotation)
+                uint? rotationOverride = rotations != null &&
+                                         rotations.TryGetValue(entry.SourceModeIndex, out var rotation)
                     ? rotation
-                    : entry.Rotation;
+                    : null;
+                var intendedRotation = ResolveVerificationRotation(entry.Rotation, rotationOverride);
 
-                if (rotations != null &&
-                    rotations.TryGetValue(entry.SourceModeIndex, out var expectedRotation) &&
-                    entry.Rotation != expectedRotation)
+                if (entry.Rotation != intendedRotation)
                 {
                     return false;
                 }
 
-                if (sizes != null &&
-                    sizes.TryGetValue(entry.SourceModeIndex, out var size) &&
-                    !DisplaySizeMatches(entry, size, intendedRotation))
+                DisplaySize? sizeOverride = sizes != null &&
+                                            sizes.TryGetValue(entry.SourceModeIndex, out var resolvedSize)
+                    ? resolvedSize
+                    : null;
+                var intendedSize = ResolveVerificationSize(
+                    new DisplaySize(entry.Width, entry.Height),
+                    sizeOverride);
+                if (!DisplaySizeMatches(
+                        entry,
+                        intendedSize,
+                        intendedRotation,
+                        allowQuarterTurnEquivalent: sizeOverride.HasValue))
                 {
                     return false;
                 }
@@ -1644,22 +1811,32 @@ namespace WorkMonitorSwitcher.Services
                         $"expected {intendedPosition.X},{intendedPosition.Y}.");
                 }
 
-                var intendedRotation = intendedRotations != null &&
-                                       intendedRotations.TryGetValue(intended.SourceModeIndex, out var rotation)
+                uint? rotationOverride = intendedRotations != null &&
+                                         intendedRotations.TryGetValue(intended.SourceModeIndex, out var rotation)
                     ? rotation
-                    : actual.Rotation;
+                    : null;
+                var intendedRotation = ResolveVerificationRotation(
+                    intended.Rotation,
+                    rotationOverride);
 
-                if (intendedRotations != null &&
-                    intendedRotations.TryGetValue(intended.SourceModeIndex, out var expectedRotation) &&
-                    actual.Rotation != expectedRotation)
+                if (actual.Rotation != intendedRotation)
                 {
                     issues.Add(
-                        $"Display '{intended.Name}' rotation is {actual.Rotation}; expected {expectedRotation}.");
+                        $"Display '{intended.Name}' rotation is {actual.Rotation}; expected {intendedRotation}.");
                 }
 
-                if (intendedSizes != null &&
-                    intendedSizes.TryGetValue(intended.SourceModeIndex, out var intendedSize) &&
-                    !DisplaySizeMatches(actual, intendedSize, intendedRotation))
+                DisplaySize? sizeOverride = intendedSizes != null &&
+                                            intendedSizes.TryGetValue(intended.SourceModeIndex, out var resolvedSize)
+                    ? resolvedSize
+                    : null;
+                var intendedSize = ResolveVerificationSize(
+                    new DisplaySize(intended.Width, intended.Height),
+                    sizeOverride);
+                if (!DisplaySizeMatches(
+                        actual,
+                        intendedSize,
+                        intendedRotation,
+                        allowQuarterTurnEquivalent: sizeOverride.HasValue))
                 {
                     issues.Add(
                         $"Display '{intended.Name}' size is {actual.Width}x{actual.Height}; " +
@@ -1689,15 +1866,41 @@ namespace WorkMonitorSwitcher.Services
                    Math.Abs((long)actual.Y - intended.Y) <= tolerance;
         }
 
-        private static bool DisplaySizeMatches(PathEntry entry, DisplaySize size, uint rotation)
+        internal static DisplaySize ResolveVerificationSize(
+            DisplaySize capturedSize,
+            DisplaySize? overrideSize)
+            => overrideSize ?? capturedSize;
+
+        internal static uint ResolveVerificationRotation(
+            uint capturedRotation,
+            uint? overrideRotation)
+            => overrideRotation ?? capturedRotation;
+
+        internal static bool EffectiveDisplaySizeMatches(
+            DisplaySize actualSize,
+            DisplaySize intendedSize,
+            uint rotation,
+            bool allowQuarterTurnEquivalent)
         {
-            if (entry.Width == size.Width && entry.Height == size.Height)
+            if (actualSize == intendedSize)
                 return true;
 
-            return IsQuarterTurn(rotation) &&
-                   entry.Width == size.Height &&
-                   entry.Height == size.Width;
+            return allowQuarterTurnEquivalent &&
+                   IsQuarterTurn(rotation) &&
+                   actualSize.Width == intendedSize.Height &&
+                   actualSize.Height == intendedSize.Width;
         }
+
+        private static bool DisplaySizeMatches(
+            PathEntry entry,
+            DisplaySize size,
+            uint rotation,
+            bool allowQuarterTurnEquivalent)
+            => EffectiveDisplaySizeMatches(
+                new DisplaySize(entry.Width, entry.Height),
+                size,
+                rotation,
+                allowQuarterTurnEquivalent);
 
         private static bool IsQuarterTurn(uint rotation)
             => rotation == 2 || rotation == 4;
@@ -1976,7 +2179,6 @@ namespace WorkMonitorSwitcher.Services
 
                 var matches = ResolveNativeIdentityToDetected(
                     identities[0],
-                    savedIdentities,
                     activeDetected);
                 if (matches.Count != 1 ||
                     !currentDevices.Contains(matches[0].DeviceName) ||
@@ -1995,23 +2197,57 @@ namespace WorkMonitorSwitcher.Services
 
         private static IReadOnlyList<DetectedMonitor> ResolveNativeIdentityToDetected(
             SavedLayoutIdentity identity,
-            IReadOnlyCollection<SavedLayoutIdentity> savedIdentities,
             IReadOnlyCollection<DetectedMonitor> detectedMonitors)
         {
-            if (DetectionService.IsCredibleSerial(identity.SerialNumber) &&
-                savedIdentities.Count(saved =>
-                    IdentityValueEquals(saved.SerialNumber, identity.SerialNumber)) == 1)
+            return detectedMonitors
+                .Where(detected => HasConsistentNativeIdentityMatch(identity, detected))
+                .ToList();
+        }
+
+        private static bool HasConsistentNativeIdentityMatch(
+            SavedLayoutIdentity saved,
+            DetectedMonitor detected)
+        {
+            bool hasStrongMatch = false;
+
+            if (NativeDisplayProfileCodec.IsStrongTargetPath(saved.NativeTargetPath) &&
+                NativeDisplayProfileCodec.IsStrongTargetPath(detected.NativeTargetPath))
             {
-                return detectedMonitors
-                    .Where(detected =>
-                        DetectionService.IsCredibleSerial(detected.SerialNumber) &&
-                        IdentityValueEquals(detected.SerialNumber, identity.SerialNumber))
-                    .ToList();
+                if (!TargetPathEquals(saved.NativeTargetPath, detected.NativeTargetPath))
+                    return false;
+
+                hasStrongMatch = true;
             }
 
-            return detectedMonitors
-                .Where(detected => TargetPathEquals(detected.NativeTargetPath, identity.NativeTargetPath))
-                .ToList();
+            if (!string.IsNullOrWhiteSpace(saved.InstanceId) &&
+                !string.IsNullOrWhiteSpace(detected.InstanceId))
+            {
+                if (!IdentityValueEquals(saved.InstanceId, detected.InstanceId))
+                    return false;
+
+                hasStrongMatch = true;
+            }
+
+            if (!string.IsNullOrWhiteSpace(saved.MonitorKey) &&
+                !string.IsNullOrWhiteSpace(detected.MonitorKey))
+            {
+                if (!IdentityValueEquals(saved.MonitorKey, detected.MonitorKey))
+                    return false;
+
+                hasStrongMatch = true;
+            }
+
+            // Serial numbers can be duplicated or reported inconsistently by otherwise
+            // identical displays. They may reject a contradictory candidate, but never
+            // establish physical identity on their own.
+            if (DetectionService.IsCredibleSerial(saved.SerialNumber) &&
+                DetectionService.IsCredibleSerial(detected.SerialNumber) &&
+                !IdentityValueEquals(saved.SerialNumber, detected.SerialNumber))
+            {
+                return false;
+            }
+
+            return hasStrongMatch;
         }
 
         internal static (
