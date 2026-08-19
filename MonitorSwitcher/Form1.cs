@@ -1788,9 +1788,7 @@ namespace WorkMonitorSwitcher
                 {
                     ThemedMessageBox.Info(
                         this,
-                        displayActionAlreadyHeld
-                            ? $"Profile '{profile}' applied. Windows' monitor arrangement was left unchanged."
-                            : $"Profile '{profile}' applied. Windows' monitor arrangement was left unchanged.",
+                        $"Profile '{profile}' applied.",
                         "Apply Monitor Profile",
                         _uiSettings.DarkMode);
                 }
