@@ -8,6 +8,7 @@
 - Profiles now control only which physical monitors are enabled. Profile changes, reconnects and direct Enable actions no longer reapply saved position, resolution, rotation or preferred-primary state.
 - Windows Display Settings is now authoritative for monitor arrangement. Profile application asks Windows to use its persisted configuration for the requested physical monitor set and is a no-op when that set is already active.
 - Profile application still requires and verifies an exact physical monitor set, so a partial activation cannot be reported as successful.
+- Added a main-window profile selector. The Apply button is highlighted only when the selected valid profile differs from the reliably detected active monitor set.
 - Native profile validation, cancellation and invalid topology results are no longer reported as successful saves or restores.
 - Start-up restores are cancelled when a manual display action begins, and launching a portable or rollback copy no longer retargets the existing Windows start-up entry.
 - Corrupt or missing JSON settings recover from valid backups without replacing the good backup.

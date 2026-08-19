@@ -91,9 +91,12 @@ namespace WorkMonitorSwitcher
         private Button? _btnRefresh;
         private Button? _btnSaveLayout;
         private Button? _btnRestoreLayout;
+        private Label? _profileSelectorLabel;
+        private ComboBox? _profileSelector;
         private Label? _sectionTitleLabel;
         private Label? _summaryLabel;
         private Panel? _hrTop;
+        private Panel? _hrProfile;
         private Panel? _missingToolPanel;
         private Label? _missingToolLabel;
         private Button? _missingToolSettingsButton;
@@ -264,11 +267,31 @@ namespace WorkMonitorSwitcher
             {
                 Text = "Apply",
                 Size = new Size(82, 32),
-                Tone = ThemedButtonTone.Primary
+                Tone = ThemedButtonTone.Primary,
+                Enabled = false
             };
             _btnRestoreLayout.Click += async (_, __) => await RestoreSelectedLayoutProfileAsync(showMessage: true);
             Controls.Add(_btnRestoreLayout);
             _toolTip.SetToolTip(_btnRestoreLayout, "Apply only the selected profile's enabled monitor set. Windows keeps the arrangement.");
+
+            _profileSelectorLabel = new Label
+            {
+                AutoSize = false,
+                Text = "Profile",
+                TextAlign = ContentAlignment.MiddleLeft,
+                Size = new Size(58, 28)
+            };
+            Controls.Add(_profileSelectorLabel);
+
+            _profileSelector = new ComboBox
+            {
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                IntegralHeight = true,
+                Size = new Size(RowPanelWidth - 68, 28)
+            };
+            _profileSelector.SelectionChangeCommitted += ProfileSelector_SelectionChangeCommitted;
+            Controls.Add(_profileSelector);
+            _toolTip.SetToolTip(_profileSelector, "Select the monitor profile to apply. Selecting it does not change any monitors.");
 
             _sectionTitleLabel = new Label
             {
@@ -311,6 +334,10 @@ namespace WorkMonitorSwitcher
 
             _hrTop = new Panel { Height = 1, BackColor = SystemColors.ControlDark, Visible = true };
             Controls.Add(_hrTop);
+            _hrProfile = new Panel { Height = 1, BackColor = SystemColors.ControlDark, Visible = true };
+            Controls.Add(_hrProfile);
+
+            RefreshProfileSelectorItems();
 
             SizeChanged += (_, __) => LeftTopButtons();
             Layout += (_, __) => LeftTopButtons();
@@ -724,6 +751,9 @@ namespace WorkMonitorSwitcher
             return TopButtonsY + buttonHeight + 10;
         }
 
+        private int GetProfileSeparatorY()
+            => GetSeparatorY() + 46;
+
         private void UpdateTopSeparator()
         {
             if (_hrTop == null) return;
@@ -733,6 +763,26 @@ namespace WorkMonitorSwitcher
             _hrTop.Width = Math.Max(0, contentWidth - (SideMargin * 2));
             _hrTop.Height = 1;
             // color is updated by ApplyTheme
+
+            if (_profileSelectorLabel != null && _profileSelector != null)
+            {
+                int profileY = y + 9;
+                _profileSelectorLabel.Location = new Point(SideMargin, profileY);
+                _profileSelector.Location = new Point(_profileSelectorLabel.Right + 10, profileY);
+                _profileSelector.Width = Math.Max(
+                    120,
+                    SideMargin + RowPanelWidth - _profileSelector.Left);
+                _profileSelectorLabel.BringToFront();
+                _profileSelector.BringToFront();
+            }
+
+            if (_hrProfile != null)
+            {
+                _hrProfile.Location = new Point(SideMargin, GetProfileSeparatorY());
+                _hrProfile.Width = Math.Max(0, contentWidth - (SideMargin * 2));
+                _hrProfile.Height = 1;
+                _hrProfile.BringToFront();
+            }
 
             UpdateMissingToolPanel();
             UpdateSectionHeaderLayout();
@@ -750,7 +800,7 @@ namespace WorkMonitorSwitcher
             _missingToolLabel.Text = "Monitor detection is limited.\nActive displays only; see Diagnostics.";
             _toolTip.SetToolTip(_missingToolLabel, _displayedDetectionWarning);
 
-            int y = GetSeparatorY() + 8;
+            int y = GetProfileSeparatorY() + 8;
             int contentWidth = Math.Min(ClientSize.Width, GetCompactClientWidth());
             _missingToolPanel.Location = new Point(SideMargin, y);
             _missingToolPanel.Width = Math.Max(0, contentWidth - (SideMargin * 2));
@@ -768,7 +818,7 @@ namespace WorkMonitorSwitcher
             if (_sectionTitleLabel == null || _summaryLabel == null)
                 return;
 
-            int y = GetSeparatorY() + (_hrTop?.Height ?? 1) + 12;
+            int y = GetProfileSeparatorY() + (_hrProfile?.Height ?? 1) + 12;
             if (_missingToolPanel?.Visible == true)
                 y = _missingToolPanel.Bottom + 12;
 
@@ -943,6 +993,121 @@ namespace WorkMonitorSwitcher
 
         private string SelectedLayoutPath()
             => _profileStore.GetLayoutPath(SelectedLayoutProfileName());
+
+        private void RefreshProfileSelectorItems()
+        {
+            if (_profileSelector == null)
+                return;
+
+            var profiles = _profileStore.LoadProfileNames();
+            var selected = SelectedLayoutProfileName();
+            _profileSelector.BeginUpdate();
+            try
+            {
+                _profileSelector.Items.Clear();
+                foreach (var profile in profiles)
+                    _profileSelector.Items.Add(profile);
+
+                var selectedItem = profiles.FirstOrDefault(profile =>
+                    profile.Equals(selected, StringComparison.OrdinalIgnoreCase)) ??
+                    profiles.FirstOrDefault() ??
+                    LayoutProfileStore.DefaultProfileName;
+                if (!selectedItem.Equals(selected, StringComparison.OrdinalIgnoreCase))
+                {
+                    _uiSettings.SelectedLayoutProfile = selectedItem;
+                    LogPersistenceResult(
+                        "repair selected monitor profile",
+                        _uiStore.SaveWithResult(_uiSettings));
+                }
+                _profileSelector.SelectedItem = selectedItem;
+            }
+            finally
+            {
+                _profileSelector.EndUpdate();
+            }
+        }
+
+        private void ProfileSelector_SelectionChangeCommitted(object? sender, EventArgs e)
+        {
+            if (_profileSelector?.SelectedItem is not string selectedProfile)
+                return;
+
+            var normalised = LayoutProfileStore.NormalizeProfileName(selectedProfile);
+            if (normalised.Equals(SelectedLayoutProfileName(), StringComparison.OrdinalIgnoreCase))
+                return;
+
+            var previous = _uiSettings.SelectedLayoutProfile;
+            _uiSettings.SelectedLayoutProfile = normalised;
+            var saveResult = _uiStore.SaveWithResult(_uiSettings);
+            LogPersistenceResult($"select monitor profile '{normalised}'", saveResult);
+            if (!saveResult.Success)
+            {
+                _uiSettings.SelectedLayoutProfile = previous;
+                RefreshProfileSelectorItems();
+                ThemedMessageBox.Warn(
+                    this,
+                    $"Unable to select profile '{normalised}'. {saveResult.ErrorMessage}",
+                    "Monitor Switcher",
+                    _uiSettings.DarkMode);
+                return;
+            }
+
+            CancelQueuedStartupLayoutRestore("select monitor profile");
+            CancelQueuedReconnectLayoutRestore("select monitor profile");
+            _log.Write($"Selected monitor profile '{normalised}' without changing the active monitor set.");
+            UpdateProfileApplyButtonState();
+        }
+
+        private void UpdateProfileApplyButtonState()
+        {
+            if (_btnRestoreLayout == null)
+                return;
+
+            bool profilePairValid = false;
+            bool exactSetActive = false;
+            string path = SelectedLayoutPath();
+            if (!_displayedDetectionUsedScreenFallback &&
+                LayoutProfileTransaction.IsValidProfilePair(
+                    path,
+                    LayoutIdentityStore.GetIdentityPath(path),
+                    out _))
+            {
+                profilePairValid = true;
+                exactSetActive = DisplayTopologyService.IsExactSavedMonitorSetActive(
+                    path,
+                    _detected,
+                    LayoutIdentityStore.Load(path));
+            }
+
+            bool displayActionAvailable = _displayActionGate.CurrentCount > 0;
+            _btnRestoreLayout.Enabled = ShouldEnableProfileApply(
+                detectionReliable: !_displayedDetectionUsedScreenFallback && _detected.Count > 0,
+                profilePairValid,
+                exactSetActive,
+                displayActionAvailable);
+            if (_profileSelector != null)
+                _profileSelector.Enabled = displayActionAvailable;
+
+            var palette = _uiSettings.DarkMode ? ThemePalette.Dark() : ThemePalette.Light();
+            Themer.ApplyButtonStyle(_btnRestoreLayout, palette);
+            _toolTip.SetToolTip(
+                _btnRestoreLayout,
+                _btnRestoreLayout.Enabled
+                    ? "Apply the selected profile's enabled monitor set. Windows keeps the arrangement."
+                    : exactSetActive
+                        ? "The selected profile is already applied."
+                        : "Apply is unavailable until the selected profile and monitor identities can be verified.");
+        }
+
+        internal static bool ShouldEnableProfileApply(
+            bool detectionReliable,
+            bool profilePairValid,
+            bool exactSetActive,
+            bool displayActionAvailable)
+            => detectionReliable &&
+               profilePairValid &&
+               !exactSetActive &&
+               displayActionAvailable;
 
         private void QueueStartupLayoutRestore()
         {
@@ -1367,6 +1532,9 @@ namespace WorkMonitorSwitcher
                     warnings.Add(settingsResult.ErrorMessage);
                 else if (!string.IsNullOrWhiteSpace(settingsResult.WarningMessage))
                     warnings.Add(settingsResult.WarningMessage);
+
+                RefreshProfileSelectorItems();
+                UpdateProfileApplyButtonState();
 
                 var message = $"Layout profile '{profile}' saved.";
                 if (warnings.Count > 0)
@@ -1840,6 +2008,7 @@ namespace WorkMonitorSwitcher
 
             // Keep HR visible
             if (_hrTop != null) _hrTop.BackColor = palette.Border;
+            if (_hrProfile != null) _hrProfile.BackColor = palette.Border;
             if (_summaryLabel != null) _summaryLabel.ForeColor = palette.TextSubtle;
             ApplyWarningBannerTheme(palette);
             UpdateButtonStatus();
@@ -1964,7 +2133,7 @@ namespace WorkMonitorSwitcher
                         if (restoreButton != null)
                         {
                             restoreButton.Text = restoreButtonText ?? "Apply";
-                            restoreButton.Enabled = true;
+                            UpdateProfileApplyButtonState();
                         }
                     }
                 }
@@ -2118,6 +2287,8 @@ namespace WorkMonitorSwitcher
             else if (!string.IsNullOrWhiteSpace(settingsResult.WarningMessage))
                 warnings.Add(settingsResult.WarningMessage);
 
+            RefreshProfileSelectorItems();
+
             await RefreshMonitorsAndUiAsync(allowDuringDisplayAction: true);
             _lifetimeCancellation.Token.ThrowIfCancellationRequested();
             var selectedLayoutProfileChanged = !string.Equals(
@@ -2141,6 +2312,7 @@ namespace WorkMonitorSwitcher
             if (_displayActionGate.Wait(0))
             {
                 _log.Write($"Display action started: {actionName}.");
+                UpdateProfileApplyButtonState();
                 return true;
             }
 
@@ -2159,6 +2331,7 @@ namespace WorkMonitorSwitcher
         {
             _log.Write($"Display action finished: {actionName}.");
             _displayActionGate.Release();
+            UpdateProfileApplyButtonState();
 
             if (_reloadAliasesAfterDisplayAction && !_lifetimeCancellation.IsCancellationRequested)
             {
@@ -2440,6 +2613,7 @@ namespace WorkMonitorSwitcher
                 var palette = _uiSettings.DarkMode ? ThemePalette.Dark() : ThemePalette.Light();
                 Themer.Apply(this, palette);
                 if (_hrTop != null) _hrTop.BackColor = palette.Border;
+                if (_hrProfile != null) _hrProfile.BackColor = palette.Border;
                 if (_summaryLabel != null) _summaryLabel.ForeColor = palette.TextSubtle;
                 ApplyWarningBannerTheme(palette);
 
@@ -2493,7 +2667,10 @@ namespace WorkMonitorSwitcher
             _btnRefresh?.BringToFront();
             _btnSaveLayout?.BringToFront();
             _btnRestoreLayout?.BringToFront();
+            _profileSelectorLabel?.BringToFront();
+            _profileSelector?.BringToFront();
             _hrTop?.BringToFront();
+            _hrProfile?.BringToFront();
 
             ForceRedraw(this);
         }
@@ -3415,6 +3592,8 @@ namespace WorkMonitorSwitcher
                 Themer.ApplyButtonStyle(ctrls.DisableButton, palette);
                 Themer.ApplyButtonStyle(ctrls.EnableButton, palette);
             }
+
+            UpdateProfileApplyButtonState();
         }
         private static bool HasUnverifiedRollback(DisplayTopologyResult? result)
             => result?.RollbackAttempted == true && !result.RollbackVerified;

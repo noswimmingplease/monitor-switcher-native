@@ -75,6 +75,7 @@ var tests = new List<(string Name, Action Body)>
     ("Physical reconnect evidence is consumed by generation", PhysicalReconnectEvidenceIsConsumedByGeneration),
     ("UiSettings disables automatic layout saves by default", UiSettingsDisablesAutomaticLayoutSavesByDefault),
     ("Profile set-change confirmation follows the disable confirmation setting", ProfileSetChangeConfirmationFollowsSetting),
+    ("Profile Apply is enabled only for a verified monitor-set difference", ProfileApplyRequiresVerifiedDifference),
     ("Form1 caps large monitor lists and reserves scrollbar width", Form1CapsLargeMonitorLists),
     ("Form1 builds unique automatic layout backup paths", Form1BuildsUniqueAutomaticLayoutBackupPaths),
 };
@@ -2329,6 +2330,24 @@ static void ProfileSetChangeConfirmationFollowsSetting()
         "Expected profile set changes to ask when disable confirmation is enabled.");
     AssertFalse(Form1.ShouldConfirmExactSetRestore(confirmBeforeDisable: false),
         "Expected explicit profile application not to ask when disable confirmation is disabled.");
+}
+
+static void ProfileApplyRequiresVerifiedDifference()
+{
+    AssertTrue(Form1.ShouldEnableProfileApply(
+            detectionReliable: true,
+            profilePairValid: true,
+            exactSetActive: false,
+            displayActionAvailable: true),
+        "Expected Apply to be enabled when the selected profile differs from the verified active set.");
+    AssertFalse(Form1.ShouldEnableProfileApply(true, true, true, true),
+        "Expected Apply to be disabled when the selected profile is already active.");
+    AssertFalse(Form1.ShouldEnableProfileApply(false, true, false, true),
+        "Expected unreliable detection to disable Apply.");
+    AssertFalse(Form1.ShouldEnableProfileApply(true, false, false, true),
+        "Expected an invalid profile pair to disable Apply.");
+    AssertFalse(Form1.ShouldEnableProfileApply(true, true, false, false),
+        "Expected another running display action to disable Apply.");
 }
 
 static void Form1CapsLargeMonitorLists()

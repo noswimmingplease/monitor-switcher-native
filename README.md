@@ -44,7 +44,7 @@ Settings includes:
 
 ## Layout Profiles
 
-Press **Save** to name and capture the currently enabled monitor set. Press **Apply** to enable the profile's monitors and disable monitors that are not in it. Selecting a different profile in Settings changes the Settings action to **Save & Apply**, which saves the settings and applies that monitor set as one guarded operation.
+Use the profile selector on the main window to choose a saved monitor set. Selection alone does not change any monitors. **Apply** is highlighted and enabled only when reliable detection confirms that the selected profile differs from the active physical monitor set. Press **Save** to name and capture the currently enabled monitor set. Selecting a different profile in Settings changes the Settings action to **Save & Apply**, which saves the settings and applies that monitor set as one guarded operation.
 
 Native profiles are versioned, app-owned configuration documents. Each active display records its strong physical identity and CCD route. Existing geometry fields remain in the file format for compatibility, but applying a profile does not use them. Profile replacement is transactional: an interrupted write is recovered or rolled back as a matched unit, and the previous valid profile is retained as a `.bak` file.
 
