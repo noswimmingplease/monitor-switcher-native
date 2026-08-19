@@ -8,7 +8,7 @@ Source repository: https://github.com/Ci303/monitor-switcher-native
 
 - Detects arbitrary numbers of active, disabled, added and disconnected monitors using Windows display APIs.
 - Shows currently connected monitors, including disabled but still-present displays, with their activity state and a quick enable or disable action.
-- Supports smooth drag-and-drop ordering of monitor cards and retains that order by physical monitor identity.
+- Supports smooth drag-and-drop ordering from each card's three-line handle and retains that order by physical monitor identity.
 - Saves and restores named layouts, including position, resolution, orientation and primary display.
 - Restores a selected profile after a physical reconnection or at sign-in when the monitor set matches safely.
 - Supports a preferred primary display, fallback primary display, dark mode, always-on-top and notification-area operation.

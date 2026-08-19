@@ -158,6 +158,39 @@ namespace WorkMonitorSwitcher.Services
         }
     }
 
+    internal sealed class MonitorDragHandle : Control
+    {
+        public MonitorDragHandle()
+        {
+            SetStyle(
+                ControlStyles.AllPaintingInWmPaint |
+                ControlStyles.OptimizedDoubleBuffer |
+                ControlStyles.SupportsTransparentBackColor |
+                ControlStyles.UserPaint,
+                true);
+            BackColor = Color.Transparent;
+            Cursor = Cursors.Hand;
+            TabStop = false;
+            AccessibleName = "Drag to reorder monitor";
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            using var pen = new Pen(ForeColor, 2f)
+            {
+                StartCap = LineCap.Round,
+                EndCap = LineCap.Round
+            };
+            int left = Math.Max(2, (Width - 14) / 2);
+            int right = Math.Min(Width - 2, left + 14);
+            int centreY = Height / 2;
+            for (int offset = -7; offset <= 7; offset += 7)
+                e.Graphics.DrawLine(pen, left, centreY + offset, right, centreY + offset);
+        }
+    }
+
     internal sealed class StatusBadge : Label
     {
         public Color FillColor { get; set; } = Color.Transparent;
@@ -247,6 +280,12 @@ namespace WorkMonitorSwitcher.Services
         {
             switch (c)
             {
+                case MonitorDragHandle dragHandle:
+                    dragHandle.BackColor = Color.Transparent;
+                    dragHandle.ForeColor = p.TextSubtle;
+                    dragHandle.Invalidate();
+                    break;
+
                 case StatusBadge badge:
                     ApplyStatusBadge(badge, p);
                     break;

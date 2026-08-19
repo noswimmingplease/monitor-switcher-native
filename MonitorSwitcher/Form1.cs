@@ -2817,17 +2817,27 @@ namespace WorkMonitorSwitcher
             Controls.Add(card);
             _dynamicControls.Add(card);
 
-            int labelX = 14;
+            int labelX = 38;
             int disableX = RowPanelWidth - (ButtonWidth * 2) - ControlGapX - 14;
             int enableX = disableX + ButtonWidth + ControlGapX;
             int buttonY = 43;
+
+            var dragHandle = new MonitorDragHandle
+            {
+                Location = new Point(7, 7),
+                Size = new Size(24, RowPanelHeight - 14),
+                ForeColor = palette.TextSubtle
+            };
+            card.Controls.Add(dragHandle);
+            AttachMonitorCardDragSurface(dragHandle, monitor.StableKey);
+            _toolTip.SetToolTip(dragHandle, "Drag to reorder monitor cards.");
 
             var label = new Label
             {
                 Text = friendlyName,
                 Location = new Point(labelX, 10),
                 AutoSize = false,
-                Size = new Size(260, 22),
+                Size = new Size(236, 22),
                 Font = new Font("Segoe UI Semibold", 9.75f, FontStyle.Regular),
                 AutoEllipsis = true
             };
@@ -2849,9 +2859,9 @@ namespace WorkMonitorSwitcher
             var detail = new Label
             {
                 Text = BuildMonitorDetailText(monitor),
-                Location = new Point(14, 45),
+                Location = new Point(labelX, 45),
                 AutoSize = false,
-                Size = new Size(Math.Max(0, disableX - 24), 24),
+                Size = new Size(Math.Max(0, disableX - labelX - 10), 24),
                 AutoEllipsis = true,
                 Font = new Font("Segoe UI", 8.25f, FontStyle.Regular),
                 ForeColor = palette.TextSubtle,
@@ -2884,12 +2894,6 @@ namespace WorkMonitorSwitcher
             card.Controls.Add(buttonOn);
             _toolTip.SetToolTip(buttonOn, "Enable this exact monitor using its current Windows physical target.");
 
-            AttachMonitorCardDragSurface(card, monitor.StableKey);
-            AttachMonitorCardDragSurface(label, monitor.StableKey);
-            AttachMonitorCardDragSurface(statusLabel, monitor.StableKey);
-            AttachMonitorCardDragSurface(detail, monitor.StableKey);
-            _toolTip.SetToolTip(card, "Drag to reorder monitor cards.");
-
             Themer.ApplyStatusBadge(statusLabel, palette);
 
             _layoutRightMost = Math.Max(_layoutRightMost, card.Right);
@@ -2908,7 +2912,7 @@ namespace WorkMonitorSwitcher
 
         private void AttachMonitorCardDragSurface(Control surface, string stableKey)
         {
-            surface.Cursor = Cursors.SizeNS;
+            surface.Cursor = Cursors.Hand;
             surface.MouseDown += (_, e) => BeginMonitorCardDrag(stableKey, surface, e);
             surface.MouseMove += (_, e) => UpdateMonitorCardDrag(stableKey, surface, e);
             surface.MouseUp += (_, e) => EndMonitorCardDrag(stableKey, surface, e);
