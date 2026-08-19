@@ -6,6 +6,7 @@ permissions:
 env:
   DOTNET_CLI_TELEMETRY_OPTOUT: '1'
   DOTNET_NOLOGO: 'true'
+  RUNTIME_PACK_VERSION: '8.0.30'
 
 concurrency:
   group: release-${{ github.event_name == 'push' && github.ref_name || inputs.tag || github.run_id }}
@@ -218,6 +219,7 @@ jobs:
             "-p:InformationalVersion=$env:INFORMATIONAL_VERSION" `
             "-p:PackageVersion=$env:PACKAGE_VERSION" `
             "-p:Version=$env:PACKAGE_VERSION" `
+            "-p:RuntimeFrameworkVersion=$env:RUNTIME_PACK_VERSION" `
             -p:ContinuousIntegrationBuild=true `
             -p:IncludeSourceRevisionInInformationalVersion=false
 
@@ -274,7 +276,10 @@ jobs:
           }
           $runtimePackVersion = $runtimePackLibraries[0].Name.Split('/', 2)[1]
           $windowsDesktopPackVersion = $windowsDesktopPackLibraries[0].Name.Split('/', 2)[1]
-          $reviewedRuntimePackVersion = '8.0.30'
+          $reviewedRuntimePackVersion = $env:RUNTIME_PACK_VERSION
+          if ([string]::IsNullOrWhiteSpace($reviewedRuntimePackVersion)) {
+            throw 'The reviewed runtime-pack version was not configured.'
+          }
           if ($runtimePackVersion -ne $reviewedRuntimePackVersion -or
               $windowsDesktopPackVersion -ne $reviewedRuntimePackVersion) {
             throw "The resolved runtime packs changed from $reviewedRuntimePackVersion (Core=$runtimePackVersion, WindowsDesktop=$windowsDesktopPackVersion). Refresh the tracked runtime notices and provenance before releasing."
