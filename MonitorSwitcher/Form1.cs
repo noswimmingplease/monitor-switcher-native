@@ -1874,19 +1874,29 @@ namespace WorkMonitorSwitcher
                     }
                     else
                     {
-                        var exactSetMessage = displayActionAlreadyHeld
-                            ? $"Applying layout profile '{profile}' will enable displays saved in the profile " +
-                              "and disable currently active displays that are not in it. Continue?"
-                            : $"Restoring '{profile}' requires an exact display-set restore. " +
-                              "Windows may enable monitors saved in the profile and disable currently active monitors that are not in it. Continue?";
-                        var choice = MessageBox.Show(
-                            this,
-                            exactSetMessage,
-                            displayActionAlreadyHeld ? "Apply Layout Profile" : "Restore Monitor Set",
-                            MessageBoxButtons.YesNo,
-                            MessageBoxIcon.Warning);
-                        if (choice != DialogResult.Yes)
-                            return;
+                        int savedActiveCount = DisplayTopologyService.GetSavedActiveMonitorCount(path);
+                        int currentActiveCount = detection.Monitors.Count(monitor => monitor.IsPresent && monitor.IsActive);
+                        if (ShouldConfirmExactSetRestore(_uiSettings.ConfirmBeforeDisable))
+                        {
+                            var exactSetMessage =
+                                $"Layout profile '{profile}' saves {savedActiveCount} active display(s); " +
+                                $"Windows currently has {currentActiveCount} active. " +
+                                "Applying it may enable displays saved in the profile and disable currently active displays that are not in it. Continue?";
+                            var choice = MessageBox.Show(
+                                this,
+                                exactSetMessage,
+                                displayActionAlreadyHeld ? "Apply Layout Profile" : "Restore Monitor Set",
+                                MessageBoxButtons.YesNo,
+                                MessageBoxIcon.Warning);
+                            if (choice != DialogResult.Yes)
+                                return;
+                        }
+                        else
+                        {
+                            _log.Write(
+                                $"Applying exact display set for profile '{profile}' without confirmation because " +
+                                $"Confirm before disabling is off (saved active={savedActiveCount}, current active={currentActiveCount}).");
+                        }
 
                         _lifetimeCancellation.Token.ThrowIfCancellationRequested();
                         var exactResult = _layoutSvc.RestoreLayoutWithResult(
@@ -2685,6 +2695,9 @@ namespace WorkMonitorSwitcher
             long eventGenerationAtDetectionStart,
             long consumedEventGeneration)
             => eventGenerationAtDetectionStart > consumedEventGeneration;
+
+        internal static bool ShouldConfirmExactSetRestore(bool confirmBeforeDisable)
+            => confirmBeforeDisable;
 
         internal static bool IsReconnectDetectionSnapshotReliable(
             long eventGenerationAtDetectionStart,

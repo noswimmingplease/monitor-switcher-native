@@ -50,6 +50,8 @@ Native profiles are versioned, app-owned configuration documents. Each active di
 
 Restore validates the complete requested topology before applying it, persists the accepted topology in the Windows display database, then queries Windows again to verify the active set and geometry. Automatic reconnect restore never disables an extra display. Use an explicit **Restore** only when you intend to replace the current active set.
 
+When **Confirm before disabling** is enabled, applying a profile that changes the active display set shows the saved and current active-display counts before continuing. When it is disabled, an explicit **Restore** or **Save & Apply** proceeds without that confirmation.
+
 Profiles created by the previous external-tool version remain usable for safe geometry-only restoration when the complete active set and identity sidecar match. Exact-set restore, including activating a disabled monitor, requires a native profile; save the profile once with this version to capture the required CCD routes. Legacy files are not migrated at start-up. An explicit **Save**, or the optional automatic save-before-disable setting after an exact identity check, upgrades the selected profile transactionally.
 
 If Windows or the graphics driver starts with the wrong rotation or position, enable both **Start with Windows** and **Restore layout on app start**. Monitor Switcher will apply the selected profile shortly after sign-in when validation succeeds.

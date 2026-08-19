@@ -74,6 +74,7 @@ var tests = new List<(string Name, Action Body)>
     ("Reconnect detection rejects fallback and cross-event snapshots", ReconnectDetectionRejectsInconclusiveSnapshots),
     ("Physical reconnect evidence is consumed by generation", PhysicalReconnectEvidenceIsConsumedByGeneration),
     ("UiSettings disables automatic layout saves by default", UiSettingsDisablesAutomaticLayoutSavesByDefault),
+    ("Profile set-change confirmation follows the disable confirmation setting", ProfileSetChangeConfirmationFollowsSetting),
     ("Form1 caps large monitor lists and reserves scrollbar width", Form1CapsLargeMonitorLists),
     ("Form1 builds unique automatic layout backup paths", Form1BuildsUniqueAutomaticLayoutBackupPaths),
 };
@@ -2320,6 +2321,14 @@ static void UiSettingsDisablesAutomaticLayoutSavesByDefault()
         "Expected automatic layout saves before disable to be off by default.");
     AssertFalse(settings.RestoreLayoutOnStartup,
         "Expected startup layout restore to be off by default.");
+}
+
+static void ProfileSetChangeConfirmationFollowsSetting()
+{
+    AssertTrue(Form1.ShouldConfirmExactSetRestore(confirmBeforeDisable: true),
+        "Expected profile set changes to ask when disable confirmation is enabled.");
+    AssertFalse(Form1.ShouldConfirmExactSetRestore(confirmBeforeDisable: false),
+        "Expected explicit profile application not to ask when disable confirmation is disabled.");
 }
 
 static void Form1CapsLargeMonitorLists()

@@ -314,7 +314,7 @@ namespace WorkMonitorSwitcher
             _toolTip.SetToolTip(_chkTopMost, "Keep the main switcher window above other windows.");
             _toolTip.SetToolTip(_chkTray, "Close to the notification area instead of exiting.");
             _toolTip.SetToolTip(_chkStartup, "Start Monitor Switcher when you sign in to Windows.");
-            _toolTip.SetToolTip(_chkConfirmDisable, "Ask before disabling a monitor.");
+            _toolTip.SetToolTip(_chkConfirmDisable, "Ask before disabling a monitor directly or by applying a layout profile.");
             _toolTip.SetToolTip(_chkAutoSaveLayout, "Overwrite the selected layout profile before disabling a monitor. A backup is kept first.");
             _toolTip.SetToolTip(_chkRestoreLayoutOnStartup, "Apply the selected layout profile when Monitor Switcher starts. Use with Start with Windows to repair boot-time display drift.");
             _toolTip.SetToolTip(_layoutProfileButton, "Current layout profile used by the main window.");
