@@ -40,7 +40,7 @@ Settings is split into compact **General**, **Monitors** and **Profiles** sectio
 - Minimise-to-tray, start-with-Windows, apply-profile-on-app-start and confirm-before-disable options.
 - **Open Registry**, including double-click support for a monitor registry-key cell.
 - **Update App** for downloading the latest stable GitHub release. The updater requires the exact release archive and matching `.sha256`, validates both, and extracts the update separately without replacing the running installation.
-- A monitor identity details panel and recent diagnostics.
+- A monitor identity details panel, recent diagnostics and a guarded option to clear the saved diagnostics log.
 
 ## Layout Profiles
 
@@ -52,7 +52,7 @@ Apply validates the complete requested physical monitor set, asks Windows to use
 
 When **Confirm before disabling** is enabled, applying a profile that changes the active display set asks before continuing. When it is disabled, an explicit **Apply** or **Save & Apply** proceeds without that confirmation.
 
-Profiles created by the previous external-tool version must be saved once with this version before they can enable a disabled monitor, because native CCD route identities are required. Legacy files are not migrated at start-up. An explicit **Save**, or the optional automatic save-before-disable setting after an exact identity check, upgrades the selected profile transactionally.
+Profiles created by the previous external-tool version must be saved once with this version before they can enable a disabled monitor, because native CCD route identities are required. Legacy files are not migrated at start-up. An explicit **Save** upgrades the selected profile transactionally.
 
 Enable both **Start with Windows** and **Apply monitor profile on app start** if the selected enabled-monitor set should be applied shortly after sign-in. Position and orientation are still taken from Windows, not from the profile.
 

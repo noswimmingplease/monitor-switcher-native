@@ -45,6 +45,7 @@ namespace WorkMonitorSwitcher
         private readonly Button _openRegistry = new() { Text = "Open Registry", AutoSize = true };
         private readonly Button _updateApp = new() { Text = "Update App", AutoSize = true };
         private readonly Button _showDiagnostics = new() { Text = "Diagnostics", AutoSize = true };
+        private readonly Button _clearDiagnostics = new ThemedButton { Text = "Clear Diagnostics", AutoSize = true, Tone = ThemedButtonTone.Danger };
         private readonly CheckBox _chkDark = new() { Text = "Dark mode", AutoSize = true };
         private readonly CheckBox _chkTopMost = new() { Text = "Always on top", AutoSize = true };
         private readonly CheckBox _chkTray = new() { Text = "Minimize to tray", AutoSize = true };
@@ -63,7 +64,9 @@ namespace WorkMonitorSwitcher
             TabStop = false
         };
         private readonly BindingList<AliasViewRow> _rows;
-        private readonly string _diagnosticsText;
+        private string _diagnosticsText;
+        private readonly Func<string>? _readDiagnostics;
+        private readonly Func<string?>? _clearDiagnosticsLog;
         private readonly List<string> _layoutProfileNames;
         private readonly string _initialSelectedLayoutProfile;
         private string _selectedLayoutProfile;
@@ -109,6 +112,8 @@ namespace WorkMonitorSwitcher
             List<string> layoutProfiles,
             string selectedLayoutProfile,
             string diagnosticsText,
+            Func<string>? readDiagnostics = null,
+            Func<string?>? clearDiagnosticsLog = null,
             Form? sizingOwner = null)
 
         {
@@ -116,6 +121,8 @@ namespace WorkMonitorSwitcher
             _diagnosticsText = string.IsNullOrWhiteSpace(diagnosticsText)
                 ? "No diagnostic events have been recorded yet."
                 : diagnosticsText;
+            _readDiagnostics = readDiagnostics;
+            _clearDiagnosticsLog = clearDiagnosticsLog;
             _layoutProfileNames = layoutProfiles
                 .Where(p => !string.IsNullOrWhiteSpace(p))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -304,6 +311,7 @@ namespace WorkMonitorSwitcher
             _deleteProfile.Click += (_, __) => DeleteSelectedProfile();
             _updateApp.Click += async (_, __) => await UpdateAppAsync();
             _showDiagnostics.Click += (_, __) => ShowDiagnosticsDialog();
+            _clearDiagnostics.Click += (_, __) => ClearDiagnostics();
             _toolTip.SetToolTip(_chkDark, "Use the dark color theme.");
             _toolTip.SetToolTip(_chkTopMost, "Keep the main switcher window above other windows.");
             _toolTip.SetToolTip(_chkTray, "Close to the notification area instead of exiting.");
@@ -316,6 +324,7 @@ namespace WorkMonitorSwitcher
             _toolTip.SetToolTip(_openRegistry, "Open Registry Editor at the selected monitor key.");
             _toolTip.SetToolTip(_updateApp, "Download the latest GitHub release asset if one is published.");
             _toolTip.SetToolTip(_showDiagnostics, "Show recent monitor action and layout profile events.");
+            _toolTip.SetToolTip(_clearDiagnostics, "Permanently clear the saved diagnostics log and its temporary exported copy.");
 
             var bottom = new TableLayoutPanel
             {
@@ -336,7 +345,7 @@ namespace WorkMonitorSwitcher
                 AutoSize = true
             };
 
-            foreach (var button in new[] { _openRegistry, _updateApp, _showDiagnostics, _remove, _cancel, _ok })
+            foreach (var button in new[] { _openRegistry, _updateApp, _showDiagnostics, _clearDiagnostics, _remove, _cancel, _ok })
                 button.Margin = new Padding(0, 0, 8, 0);
 
             commitActions.Controls.Add(_ok);
@@ -398,6 +407,7 @@ namespace WorkMonitorSwitcher
             };
             maintenanceActions.Controls.Add(_updateApp);
             maintenanceActions.Controls.Add(_showDiagnostics);
+            maintenanceActions.Controls.Add(_clearDiagnostics);
             maintenanceGroup.Controls.Add(maintenanceActions);
 
             generalLayout.Controls.Add(appearanceGroup, 0, 0);
@@ -870,7 +880,11 @@ namespace WorkMonitorSwitcher
         {
             try
             {
-                var path = Path.Combine(Path.GetTempPath(), "MonitorSwitcher-diagnostics.txt");
+                var latestDiagnostics = _readDiagnostics?.Invoke();
+                if (!string.IsNullOrWhiteSpace(latestDiagnostics))
+                    _diagnosticsText = latestDiagnostics;
+
+                var path = DiagnosticsExportPath();
                 File.WriteAllText(path, _diagnosticsText);
                 Process.Start(new ProcessStartInfo("notepad.exe", $"\"{path}\"") { UseShellExecute = true });
             }
@@ -880,6 +894,78 @@ namespace WorkMonitorSwitcher
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
         }
+
+        private void ClearDiagnostics()
+        {
+            if (_clearDiagnosticsLog == null)
+            {
+                MessageBox.Show(this, "Diagnostics cannot be cleared from this build.", "Clear Diagnostics",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            if (MessageBox.Show(
+                    this,
+                    "Permanently clear the saved diagnostics log?",
+                    "Clear Diagnostics",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Question) != DialogResult.Yes)
+            {
+                return;
+            }
+
+            string? clearError;
+            try
+            {
+                clearError = _clearDiagnosticsLog();
+            }
+            catch (Exception ex)
+            {
+                clearError = ex.Message;
+            }
+
+            if (!string.IsNullOrWhiteSpace(clearError))
+            {
+                MessageBox.Show(this, $"Unable to clear diagnostics.\n{clearError}", "Clear Diagnostics",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            try
+            {
+                var latestDiagnostics = _readDiagnostics?.Invoke();
+                _diagnosticsText = string.IsNullOrWhiteSpace(latestDiagnostics)
+                    ? "No diagnostic events have been recorded yet."
+                    : latestDiagnostics;
+            }
+            catch
+            {
+                _diagnosticsText = "No diagnostic events have been recorded yet.";
+            }
+
+            try
+            {
+                var exportPath = DiagnosticsExportPath();
+                if (File.Exists(exportPath))
+                    File.Delete(exportPath);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(
+                    this,
+                    $"The saved diagnostics log was cleared, but its temporary exported copy could not be removed.\n{ex.Message}",
+                    "Clear Diagnostics",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                return;
+            }
+
+            MessageBox.Show(this, "Diagnostics cleared.", "Clear Diagnostics",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        private static string DiagnosticsExportPath()
+            => Path.Combine(Path.GetTempPath(), "MonitorSwitcher-diagnostics.txt");
 
         private void UpdateDetailsPanel()
         {

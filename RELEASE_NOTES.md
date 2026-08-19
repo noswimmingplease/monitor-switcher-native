@@ -24,6 +24,7 @@
 - Large monitor lists are vertically scrollable and bounded to the current working area.
 - Refreshed the light and dark themes with clearer hierarchy, accessible primary actions, semantic status badges, softer monitor cards, and a proper degraded-detection banner.
 - Repeated monitor refreshes now release dynamic tooltip registrations and rounded-card drawing resources immediately.
+- Added a confirmed Clear Diagnostics action that removes both the saved log and its temporary exported copy, with partial failures reported to the user.
 - Added explicit Windows CI/release regression execution, deterministic release versioning, SHA-256 release sidecars, and expanded rollback-focused coverage.
 
 ## v0.3.9 - 2026-07-06

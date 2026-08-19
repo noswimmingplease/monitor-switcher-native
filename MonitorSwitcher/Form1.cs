@@ -1953,7 +1953,13 @@ namespace WorkMonitorSwitcher
                     _profileStore.LoadProfileNames(),
                     SelectedLayoutProfileName(),
                     _log.Read(),
-                    this)
+                    readDiagnostics: _log.Read,
+                    clearDiagnosticsLog: () =>
+                    {
+                        var result = _log.ClearWithResult();
+                        return result.Success ? null : result.ErrorMessage;
+                    },
+                    sizingOwner: this)
                 {
                     StartPosition = FormStartPosition.CenterParent,
                     ShowInTaskbar = false,

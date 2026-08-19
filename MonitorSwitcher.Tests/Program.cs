@@ -46,6 +46,7 @@ var tests = new List<(string Name, Action Body)>
     ("Explicit JSON save reports a useful filesystem failure", JsonSaveReportsFilesystemFailure),
     ("Atomic JSON save preserves a valid backup behind a corrupt primary", JsonSavePreservesValidBackupBehindCorruptPrimary),
     ("Diagnostics logging serialises concurrent writers", DiagnosticsLogSerialisesConcurrentWriters),
+    ("Diagnostics logging can be cleared safely", DiagnosticsLogClearsSafely),
     ("Layout identities fail closed when only an older sidecar backup is valid", LayoutIdentityRejectsIndependentBackupRecovery),
     ("Layout profile transaction commits the layout and identity map together", LayoutProfileTransactionCommitsMatchedPair),
     ("Layout profile transaction restores every original after a mid-commit failure", LayoutProfileTransactionRollsBackMatchedPair),
@@ -2320,6 +2321,44 @@ static void UiSettingsDisablesStartupProfileApplicationByDefault()
 
     AssertFalse(settings.RestoreLayoutOnStartup,
         "Expected startup profile application to be off by default.");
+}
+
+static void DiagnosticsLogClearsSafely()
+{
+    var dir = Path.Combine(Path.GetTempPath(), "MonitorSwitcher.Tests", Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(dir);
+
+    try
+    {
+        var log = new DiagnosticsLog(dir);
+        log.Write("diagnostic-entry-to-clear");
+        AssertTrue(log.Read().Contains("diagnostic-entry-to-clear", StringComparison.Ordinal),
+            "Expected the diagnostic entry to exist before clearing.");
+
+        var firstClear = log.ClearWithResult();
+        AssertTrue(firstClear.Success, "Expected the diagnostics log to clear successfully.");
+        AssertTrue(firstClear.Changed, "Expected clearing an existing diagnostics log to report a change.");
+        AssertEquals("No diagnostic events have been recorded yet.", log.Read(),
+            "Expected a cleared diagnostics log to read as empty.");
+
+        var secondClear = log.ClearWithResult();
+        AssertTrue(secondClear.Success, "Expected clearing an already-empty diagnostics log to succeed.");
+        AssertFalse(secondClear.Changed, "Expected clearing an already-empty diagnostics log to report no change.");
+
+        var logPath = Path.Combine(dir, "diagnostics.log");
+        File.WriteAllText(logPath, "locked diagnostic entry");
+        using (File.Open(logPath, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            var failedClear = log.ClearWithResult();
+            AssertFalse(failedClear.Success, "Expected a locked diagnostics log to report a clear failure.");
+            AssertTrue(File.Exists(logPath), "Expected a failed clear to leave the locked log untouched.");
+        }
+    }
+    finally
+    {
+        if (Directory.Exists(dir))
+            Directory.Delete(dir, recursive: true);
+    }
 }
 
 static void ProfileSetChangeConfirmationFollowsSetting()
