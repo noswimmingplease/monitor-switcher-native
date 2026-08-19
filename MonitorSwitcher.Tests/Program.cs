@@ -37,6 +37,8 @@ var tests = new List<(string Name, Action Body)>
     ("AliasSettingsMapper applies aliases and primary selections", AliasSettingsMapperAppliesAliasesAndSelections),
     ("AliasSettingsMapper preserves aliases hidden from Settings", AliasSettingsMapperPreservesHiddenAliases),
     ("AliasSettingsMapper clears fallback when it matches preferred primary", AliasSettingsMapperClearsFallbackWhenItMatchesPreferredPrimary),
+    ("MonitorOrderService persists arbitrary visible card order", MonitorOrderServicePersistsArbitraryVisibleOrder),
+    ("MonitorOrderService preserves hidden monitor positions and rejects invalid orders", MonitorOrderServicePreservesHiddenPositions),
     ("PrimaryMonitorPreference resolves configured primary targets", PrimaryMonitorPreferenceResolvesConfiguredTargets),
     ("AtomicFileWriter replaces existing files and keeps a backup", AtomicFileWriterReplacesExistingFilesAndKeepsBackup),
     ("JSON settings recover a corrupt primary from a valid backup", JsonSettingsRecoverCorruptPrimaryFromBackup),
@@ -1163,6 +1165,54 @@ static void AliasSettingsMapperClearsFallbackWhenItMatchesPreferredPrimary()
 
     AssertTrue(aliases["SN:LEFT"].IsPreferredPrimary, "Expected preferred primary to be set.");
     AssertFalse(aliases["SN:LEFT"].IsFallbackPrimary, "Expected same-key fallback primary to be cleared.");
+}
+
+static void MonitorOrderServicePersistsArbitraryVisibleOrder()
+{
+    var aliases = Enumerable.Range(0, 12).ToDictionary(
+        index => $"SN:{index:00}",
+        index => new MonitorInfo { Name = $"Monitor {index:00}", PreferredOrder = index },
+        StringComparer.OrdinalIgnoreCase);
+    var requested = aliases.Keys.Reverse().ToList();
+
+    AssertTrue(
+        MonitorOrderService.TryApplyVisibleOrder(aliases, requested, out var error),
+        $"Expected arbitrary monitor order to be accepted: {error}");
+
+    var persistedOrder = aliases
+        .OrderBy(pair => pair.Value.PreferredOrder)
+        .Select(pair => pair.Key)
+        .ToList();
+    AssertSequence(persistedOrder, requested.ToArray());
+}
+
+static void MonitorOrderServicePreservesHiddenPositions()
+{
+    var aliases = new Dictionary<string, MonitorInfo>(StringComparer.OrdinalIgnoreCase)
+    {
+        ["SN:A"] = new MonitorInfo { PreferredOrder = 0 },
+        ["SN:HIDDEN"] = new MonitorInfo { PreferredOrder = 1 },
+        ["SN:C"] = new MonitorInfo { PreferredOrder = 2 },
+        ["SN:D"] = new MonitorInfo { PreferredOrder = 3 }
+    };
+
+    AssertTrue(
+        MonitorOrderService.TryApplyVisibleOrder(aliases, new[] { "SN:D", "SN:A", "SN:C" }, out var error),
+        $"Expected visible order to be accepted: {error}");
+    AssertEquals(0, aliases["SN:D"].PreferredOrder, "Expected first visible monitor to occupy the first visible slot.");
+    AssertEquals(1, aliases["SN:HIDDEN"].PreferredOrder, "Expected hidden monitor to retain its relative slot.");
+    AssertEquals(2, aliases["SN:A"].PreferredOrder, "Expected second visible monitor to occupy the next visible slot.");
+    AssertEquals(3, aliases["SN:C"].PreferredOrder, "Expected third visible monitor to occupy the final visible slot.");
+
+    var before = aliases.ToDictionary(pair => pair.Key, pair => pair.Value.PreferredOrder);
+    AssertFalse(
+        MonitorOrderService.TryApplyVisibleOrder(aliases, new[] { "SN:A", "SN:A" }, out _),
+        "Expected duplicate physical identities to be rejected.");
+    AssertFalse(
+        MonitorOrderService.TryApplyVisibleOrder(aliases, new[] { "SN:UNKNOWN" }, out _),
+        "Expected unknown physical identities to be rejected.");
+    foreach (var pair in before)
+        AssertEquals(pair.Value, aliases[pair.Key].PreferredOrder, "Expected an invalid reorder not to mutate saved ordering.");
 }
 
 static void PrimaryMonitorPreferenceResolvesConfiguredTargets()

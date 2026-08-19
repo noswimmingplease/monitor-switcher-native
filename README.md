@@ -8,6 +8,7 @@ Source repository: https://github.com/Ci303/monitor-switcher-native
 
 - Detects arbitrary numbers of active, disabled, added and disconnected monitors using Windows display APIs.
 - Shows currently connected monitors, including disabled but still-present displays, with their activity state and a quick enable or disable action.
+- Supports smooth drag-and-drop ordering of monitor cards and retains that order by physical monitor identity.
 - Saves and restores named layouts, including position, resolution, orientation and primary display.
 - Restores a selected profile after a physical reconnection or at sign-in when the monitor set matches safely.
 - Supports a preferred primary display, fallback primary display, dark mode, always-on-top and notification-area operation.
@@ -43,7 +44,7 @@ Settings includes:
 
 ## Layout Profiles
 
-Press **Save** to name and capture the current arrangement. Press **Restore** to apply the selected profile. The selected profile can be changed in Settings.
+Press **Save** to name and capture the current arrangement. Press **Restore** to apply the selected profile. Selecting a different profile in Settings changes the Settings action to **Save & Apply**, which saves the settings and applies that profile as one guarded operation.
 
 Native profiles are versioned, app-owned configuration documents. Each active display records its strong identity, CCD adapter/target identifiers, desktop position, resolution, orientation and primary state. Profile replacement is transactional: an interrupted write is recovered or rolled back as a matched unit, and the previous valid profile is retained as a `.bak` file.
 

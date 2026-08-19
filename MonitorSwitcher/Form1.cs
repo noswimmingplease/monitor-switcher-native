@@ -46,6 +46,8 @@ namespace WorkMonitorSwitcher
         private readonly Dictionary<string, MonitorInfo> _aliasMap = new(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, MonitorControls> _controlsByKey = new(StringComparer.OrdinalIgnoreCase);
         private readonly List<Control> _dynamicControls = new();
+        private readonly List<string> _monitorCardOrder = new();
+        private readonly List<string> _monitorCardOrderBeforeDrag = new();
         private List<DetectedMonitor> _detected = new();
         private string _lastDetectionLogSignature = string.Empty;
         private bool _displayedDetectionUsedScreenFallback;
@@ -65,6 +67,14 @@ namespace WorkMonitorSwitcher
 
         // Debounced refresh on display changes
         private readonly System.Windows.Forms.Timer _refreshTimer = new() { Interval = 800 };
+        private readonly System.Windows.Forms.Timer _monitorCardAnimationTimer = new() { Interval = 15 };
+        private string? _draggedMonitorKey;
+        private Control? _monitorCardDragCapture;
+        private Point _monitorCardDragStartScreen;
+        private Point _monitorCardLastPointerScreen;
+        private int _monitorCardDragPointerOffsetY;
+        private bool _monitorCardDragActive;
+        private bool _endingMonitorCardDrag;
 
         // ---- Layout constants / handles ----
         private const int SideMargin = 14;
@@ -319,6 +329,7 @@ namespace WorkMonitorSwitcher
                 _refreshTimer.Stop();
                 await RefreshMonitorsAndUiAsync();
             };
+            _monitorCardAnimationTimer.Tick += (_, __) => AnimateMonitorCards();
 
             LeftTopButtons();
             UpdateTopSeparator();
@@ -391,6 +402,8 @@ namespace WorkMonitorSwitcher
             _reconnectRestoreTimer?.Dispose();
             _reconnectDetectionRetryTimer?.Stop();
             _reconnectDetectionRetryTimer?.Dispose();
+            _monitorCardAnimationTimer.Stop();
+            _monitorCardAnimationTimer.Dispose();
             _trayIcon?.Dispose();
             _trayMenu?.Dispose();
             base.OnFormClosed(e);
@@ -2585,6 +2598,8 @@ namespace WorkMonitorSwitcher
 
             var toShow = BuildPresentationList();
             UpdateMonitorSummary(toShow);
+            CancelMonitorCardDrag();
+            _monitorCardOrder.Clear();
 
             int previousScrollY = Math.Max(0, -AutoScrollPosition.Y);
             if (previousScrollY > 0)
@@ -2869,18 +2884,298 @@ namespace WorkMonitorSwitcher
             card.Controls.Add(buttonOn);
             _toolTip.SetToolTip(buttonOn, "Enable this exact monitor using its current Windows physical target.");
 
+            AttachMonitorCardDragSurface(card, monitor.StableKey);
+            AttachMonitorCardDragSurface(label, monitor.StableKey);
+            AttachMonitorCardDragSurface(statusLabel, monitor.StableKey);
+            AttachMonitorCardDragSurface(detail, monitor.StableKey);
+            _toolTip.SetToolTip(card, "Drag to reorder monitor cards.");
+
             Themer.ApplyStatusBadge(statusLabel, palette);
 
             _layoutRightMost = Math.Max(_layoutRightMost, card.Right);
 
             _controlsByKey[monitor.StableKey] = new MonitorControls
             {
+                Card = card,
                 DisableButton = buttonOff,
                 EnableButton = buttonOn,
                 StatusLabel = statusLabel,
                 TitleLabel = label,
                 IsBusy = _busy.Contains(monitor.StableKey)
             };
+            _monitorCardOrder.Add(monitor.StableKey);
+        }
+
+        private void AttachMonitorCardDragSurface(Control surface, string stableKey)
+        {
+            surface.Cursor = Cursors.SizeNS;
+            surface.MouseDown += (_, e) => BeginMonitorCardDrag(stableKey, surface, e);
+            surface.MouseMove += (_, e) => UpdateMonitorCardDrag(stableKey, surface, e);
+            surface.MouseUp += (_, e) => EndMonitorCardDrag(stableKey, surface, e);
+            surface.MouseCaptureChanged += (_, __) =>
+            {
+                if (!_endingMonitorCardDrag && ReferenceEquals(_monitorCardDragCapture, surface))
+                    FinishMonitorCardDrag(saveOrder: _monitorCardDragActive);
+            };
+        }
+
+        private void BeginMonitorCardDrag(string stableKey, Control surface, MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Left ||
+                _monitorCardOrder.Count < 2 ||
+                _displayActionGate.CurrentCount == 0 ||
+                !_controlsByKey.TryGetValue(stableKey, out var controls) ||
+                controls.Card.IsDisposed)
+            {
+                return;
+            }
+
+            CancelMonitorCardDrag();
+            _draggedMonitorKey = stableKey;
+            _monitorCardDragCapture = surface;
+            _monitorCardDragStartScreen = surface.PointToScreen(e.Location);
+            _monitorCardLastPointerScreen = _monitorCardDragStartScreen;
+            _monitorCardDragPointerOffsetY = _monitorCardDragStartScreen.Y -
+                                             controls.Card.PointToScreen(Point.Empty).Y;
+            _monitorCardOrderBeforeDrag.Clear();
+            _monitorCardOrderBeforeDrag.AddRange(_monitorCardOrder);
+            surface.Capture = true;
+        }
+
+        private void UpdateMonitorCardDrag(string stableKey, Control surface, MouseEventArgs e)
+        {
+            if (!string.Equals(stableKey, _draggedMonitorKey, StringComparison.OrdinalIgnoreCase) ||
+                !ReferenceEquals(surface, _monitorCardDragCapture) ||
+                (e.Button & MouseButtons.Left) == 0 ||
+                !_controlsByKey.TryGetValue(stableKey, out var controls) ||
+                controls.Card.IsDisposed)
+            {
+                return;
+            }
+
+            var pointerScreen = surface.PointToScreen(e.Location);
+            _monitorCardLastPointerScreen = pointerScreen;
+            if (!_monitorCardDragActive)
+            {
+                var dragSize = SystemInformation.DragSize;
+                if (Math.Abs(pointerScreen.X - _monitorCardDragStartScreen.X) < dragSize.Width / 2 &&
+                    Math.Abs(pointerScreen.Y - _monitorCardDragStartScreen.Y) < dragSize.Height / 2)
+                {
+                    return;
+                }
+
+                _monitorCardDragActive = true;
+                controls.Card.BorderColor = (_uiSettings.DarkMode ? ThemePalette.Dark() : ThemePalette.Light()).Accent;
+                controls.Card.Invalidate();
+                controls.Card.BringToFront();
+            }
+
+            PositionDraggedMonitorCard(stableKey, controls, pointerScreen);
+            _monitorCardAnimationTimer.Start();
+        }
+
+        private void PositionDraggedMonitorCard(
+            string stableKey,
+            MonitorControls controls,
+            Point pointerScreen)
+        {
+            AutoScrollMonitorCards(pointerScreen.Y);
+            var pointerClient = PointToClient(pointerScreen);
+            int firstSlotTop = GetRowsStartY() + AutoScrollPosition.Y;
+            int lastSlotTop = firstSlotTop + ((_monitorCardOrder.Count - 1) * RowVerticalGap);
+            int draggedTop = Math.Clamp(
+                pointerClient.Y - _monitorCardDragPointerOffsetY,
+                firstSlotTop,
+                lastSlotTop);
+            controls.Card.Top = draggedTop;
+
+            int destinationIndex = Math.Clamp(
+                (int)Math.Round(
+                    (draggedTop - firstSlotTop) / (double)RowVerticalGap,
+                    MidpointRounding.AwayFromZero),
+                0,
+                _monitorCardOrder.Count - 1);
+            int currentIndex = _monitorCardOrder.FindIndex(
+                key => key.Equals(stableKey, StringComparison.OrdinalIgnoreCase));
+            if (currentIndex >= 0 && currentIndex != destinationIndex)
+            {
+                _monitorCardOrder.RemoveAt(currentIndex);
+                _monitorCardOrder.Insert(destinationIndex, stableKey);
+            }
+        }
+
+        private void EndMonitorCardDrag(string stableKey, Control surface, MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Left ||
+                !string.Equals(stableKey, _draggedMonitorKey, StringComparison.OrdinalIgnoreCase) ||
+                !ReferenceEquals(surface, _monitorCardDragCapture))
+            {
+                return;
+            }
+
+            FinishMonitorCardDrag(saveOrder: _monitorCardDragActive);
+        }
+
+        private void FinishMonitorCardDrag(bool saveOrder)
+        {
+            if (_endingMonitorCardDrag)
+                return;
+
+            _endingMonitorCardDrag = true;
+            try
+            {
+                var draggedKey = _draggedMonitorKey;
+                var capture = _monitorCardDragCapture;
+                _draggedMonitorKey = null;
+                _monitorCardDragCapture = null;
+                _monitorCardDragActive = false;
+                if (capture != null)
+                    capture.Capture = false;
+
+                if (!string.IsNullOrWhiteSpace(draggedKey) &&
+                    _controlsByKey.TryGetValue(draggedKey, out var controls) &&
+                    !controls.Card.IsDisposed)
+                {
+                    controls.Card.BorderColor = (_uiSettings.DarkMode ? ThemePalette.Dark() : ThemePalette.Light()).Border;
+                    controls.Card.Invalidate();
+                }
+
+                if (saveOrder && !_monitorCardOrder.SequenceEqual(
+                        _monitorCardOrderBeforeDrag,
+                        StringComparer.OrdinalIgnoreCase))
+                {
+                    SaveMonitorCardOrder();
+                }
+
+                _monitorCardAnimationTimer.Start();
+            }
+            finally
+            {
+                _monitorCardOrderBeforeDrag.Clear();
+                _endingMonitorCardDrag = false;
+            }
+        }
+
+        private void CancelMonitorCardDrag()
+        {
+            _monitorCardAnimationTimer.Stop();
+            if (_draggedMonitorKey == null && _monitorCardDragCapture == null)
+                return;
+
+            FinishMonitorCardDrag(saveOrder: false);
+            _monitorCardAnimationTimer.Stop();
+        }
+
+        private void SaveMonitorCardOrder()
+        {
+            var previousOrders = _aliasMap.ToDictionary(
+                pair => pair.Key,
+                pair => pair.Value.PreferredOrder,
+                StringComparer.OrdinalIgnoreCase);
+            if (!MonitorOrderService.TryApplyVisibleOrder(_aliasMap, _monitorCardOrder, out var validationError))
+            {
+                RestoreMonitorOrders(previousOrders);
+                RestoreMonitorCardOrderAfterSaveFailure(validationError);
+                return;
+            }
+
+            var saveResult = _aliasStore.SaveWithResult(_aliasMap);
+            LogPersistenceResult("save dragged monitor order", saveResult);
+            if (!saveResult.Success)
+            {
+                RestoreMonitorOrders(previousOrders);
+                RestoreMonitorCardOrderAfterSaveFailure(saveResult.ErrorMessage);
+                return;
+            }
+
+            _log.Write($"Saved monitor card order: {string.Join(", ", _monitorCardOrder)}.");
+        }
+
+        private void RestoreMonitorOrders(IReadOnlyDictionary<string, int?> previousOrders)
+        {
+            foreach (var pair in previousOrders)
+            {
+                if (_aliasMap.TryGetValue(pair.Key, out var info))
+                    info.PreferredOrder = pair.Value;
+            }
+        }
+
+        private void RestoreMonitorCardOrderAfterSaveFailure(string errorMessage)
+        {
+            _monitorCardOrder.Clear();
+            _monitorCardOrder.AddRange(_monitorCardOrderBeforeDrag);
+            ThemedMessageBox.Warn(
+                this,
+                $"The monitor order could not be saved. {errorMessage}",
+                "Reorder Monitors",
+                _uiSettings.DarkMode);
+        }
+
+        private void AnimateMonitorCards()
+        {
+            if (IsDisposed || _monitorCardOrder.Count == 0)
+            {
+                _monitorCardAnimationTimer.Stop();
+                return;
+            }
+
+            if (_monitorCardDragActive &&
+                !string.IsNullOrWhiteSpace(_draggedMonitorKey) &&
+                _controlsByKey.TryGetValue(_draggedMonitorKey, out var draggedControls) &&
+                !draggedControls.Card.IsDisposed)
+            {
+                PositionDraggedMonitorCard(
+                    _draggedMonitorKey,
+                    draggedControls,
+                    _monitorCardLastPointerScreen);
+            }
+
+            int firstSlotTop = GetRowsStartY() + AutoScrollPosition.Y;
+            bool moved = false;
+            for (int index = 0; index < _monitorCardOrder.Count; index++)
+            {
+                var stableKey = _monitorCardOrder[index];
+                if (_monitorCardDragActive &&
+                    stableKey.Equals(_draggedMonitorKey, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (!_controlsByKey.TryGetValue(stableKey, out var controls) || controls.Card.IsDisposed)
+                    continue;
+
+                int targetTop = firstSlotTop + (index * RowVerticalGap);
+                int difference = targetTop - controls.Card.Top;
+                if (difference == 0)
+                    continue;
+
+                int step = Math.Abs(difference) <= 2
+                    ? difference
+                    : Math.Sign(difference) * Math.Max(2, (int)Math.Ceiling(Math.Abs(difference) * 0.35));
+                controls.Card.Top += step;
+                moved = true;
+            }
+
+            if (!moved && !_monitorCardDragActive)
+                _monitorCardAnimationTimer.Stop();
+        }
+
+        private void AutoScrollMonitorCards(int pointerScreenY)
+        {
+            const int edgeSize = 44;
+            const int scrollStep = 20;
+            var pointerClient = PointToClient(new Point(PointToScreen(Point.Empty).X, pointerScreenY));
+            int currentScroll = Math.Max(0, -AutoScrollPosition.Y);
+            int maximumScroll = Math.Max(0, AutoScrollMinSize.Height - ClientSize.Height);
+            int requestedScroll = currentScroll;
+
+            if (pointerClient.Y < GetRowsStartY() + edgeSize)
+                requestedScroll = Math.Max(0, currentScroll - scrollStep);
+            else if (pointerClient.Y > ClientSize.Height - edgeSize)
+                requestedScroll = Math.Min(maximumScroll, currentScroll + scrollStep);
+
+            if (requestedScroll != currentScroll)
+                AutoScrollPosition = new Point(0, requestedScroll);
         }
 
         private string BuildMonitorDetailText(DetectedMonitor monitor)
@@ -3939,8 +4234,9 @@ namespace WorkMonitorSwitcher
     }
 
     // Small UI handle bag (no logic)
-    public class MonitorControls
+    internal sealed class MonitorControls
     {
+        public ThemedCardPanel Card { get; set; } = new();
         public Button DisableButton { get; set; } = new();
         public Button EnableButton { get; set; } = new();
         public Label StatusLabel { get; set; } = new();
