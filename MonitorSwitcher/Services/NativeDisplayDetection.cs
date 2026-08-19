@@ -150,6 +150,20 @@ namespace WorkMonitorSwitcher.Services
                     "their instance/path identity may change after a port or adapter change.");
             }
 
+            var duplicateSerialMonitorCount = monitors
+                .Where(monitor => DetectionService.IsCredibleSerial(monitor.SerialNumber))
+                .GroupBy(
+                    monitor => DetectionService.NormalizeStable(monitor.SerialNumber),
+                    StringComparer.OrdinalIgnoreCase)
+                .Where(group => group.Count() > 1)
+                .Sum(group => group.Count());
+            if (duplicateSerialMonitorCount > 0)
+            {
+                warnings.Add(
+                    $"{duplicateSerialMonitorCount} connected display(s) shared an EDID serial; " +
+                    "their unique Windows instance or native target identity was used instead.");
+            }
+
             return new NativeDisplayDetectionResult(monitors, string.Join(" ", warnings));
         }
 
@@ -287,11 +301,34 @@ namespace WorkMonitorSwitcher.Services
                 .ToList();
             if (duplicateSerials.Count > 0)
             {
-                error =
-                    "More than one connected display reported the same EDID serial number: " +
-                    string.Join(", ", duplicateSerials) + ". Physical identity is ambiguous.";
-                monitors.Clear();
-                return false;
+                var uniqueInstanceIds = UniqueIdentityValues(monitors, monitor => monitor.InstanceId);
+                var uniqueNativeTargets = UniqueIdentityValues(
+                    monitors,
+                    monitor => NativeDisplayProfileCodec.IsStrongTargetPath(monitor.NativeTargetPath)
+                        ? monitor.NativeTargetPath
+                        : null);
+
+                var ambiguous = monitors
+                    .Where(monitor => duplicateSerials.Contains(
+                        DetectionService.NormalizeStable(monitor.SerialNumber),
+                        StringComparer.OrdinalIgnoreCase))
+                    .Where(monitor =>
+                    {
+                        var instanceId = DetectionService.NormalizeStable(monitor.InstanceId);
+                        var targetPath = DetectionService.NormalizeStable(monitor.NativeTargetPath);
+                        return !uniqueInstanceIds.Contains(instanceId) &&
+                               !uniqueNativeTargets.Contains(targetPath);
+                    })
+                    .ToList();
+                if (ambiguous.Count > 0)
+                {
+                    error =
+                        "More than one connected display reported the same EDID serial number, " +
+                        "and Windows did not provide a unique instance or native target identity for every display: " +
+                        string.Join(", ", duplicateSerials) + ". Physical identity is ambiguous.";
+                    monitors.Clear();
+                    return false;
+                }
             }
 
             monitors = monitors
@@ -551,6 +588,19 @@ namespace WorkMonitorSwitcher.Services
                 $"{classGuid.ToString("B").ToUpperInvariant()}\\{parts[1].ToUpperInvariant()}";
             return true;
         }
+
+        private static HashSet<string> UniqueIdentityValues(
+            IEnumerable<DetectedMonitor> monitors,
+            Func<DetectedMonitor, string?> selector)
+            => monitors
+                .Select(selector)
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Select(DetectionService.NormalizeStable)
+                .Where(value => value.Length > 0)
+                .GroupBy(value => value, StringComparer.OrdinalIgnoreCase)
+                .Where(group => group.Count() == 1)
+                .Select(group => group.Key)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         internal static bool TryDecodeEdid(byte[]? edid, out NativeEdidIdentity identity)
         {

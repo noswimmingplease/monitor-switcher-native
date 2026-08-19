@@ -15,7 +15,7 @@ internal static class NativeDetectionTests
         register("Native detection rejects multiple active endpoints for one monitor", RejectsMultipleActiveEndpoints);
         register("Native detection rejects active paths whose target is unavailable", RejectsUnavailableActiveTarget);
         register("Native detection rejects active paths without a strong target identity", RejectsUnidentifiedActiveTarget);
-        register("Native detection rejects duplicate credible serial identities", RejectsDuplicateCredibleSerials);
+        register("Native detection uses unique Windows identities for duplicate credible serials", UsesUniqueWindowsIdentityForDuplicateCredibleSerials);
         register("Native detection decodes source modes from each path's virtual-mode flag", DecodesVirtualSourceModeIndexPerPath);
     }
 
@@ -185,7 +185,7 @@ internal static class NativeDetectionTests
         AssertTrue(error.Contains("strong monitor device path", StringComparison.OrdinalIgnoreCase), error);
     }
 
-    private static void RejectsDuplicateCredibleSerials()
+    private static void UsesUniqueWindowsIdentityForDuplicateCredibleSerials()
     {
         var candidates = new[]
         {
@@ -195,10 +195,14 @@ internal static class NativeDetectionTests
                 MonitorPath("AOC2703", "INSTANCE-B"), "DUPLICATE-SERIAL", "AOC2703")
         };
 
-        AssertFalse(
-            NativeDisplayDetection.TryConsolidateCandidates(candidates, out _, out var error),
-            "Duplicate credible EDID serials must fail closed instead of changing stable keys with population.");
-        AssertTrue(error.Contains("same EDID serial", StringComparison.OrdinalIgnoreCase), error);
+        AssertTrue(
+            NativeDisplayDetection.TryConsolidateCandidates(candidates, out var monitors, out var error),
+            $"Expected unique Windows instance identities to disambiguate the duplicate serials: {error}");
+        DetectionService.AssignUniqueStableKeys(monitors);
+        AssertEqual(2, monitors.Count);
+        AssertTrue(monitors.All(monitor => monitor.StableKey.StartsWith("IID:", StringComparison.OrdinalIgnoreCase)),
+            "Expected duplicate serials to fall back to stable Windows instance identities.");
+        AssertEqual(2, monitors.Select(monitor => monitor.StableKey).Distinct(StringComparer.OrdinalIgnoreCase).Count());
     }
 
     private static void DecodesVirtualSourceModeIndexPerPath()

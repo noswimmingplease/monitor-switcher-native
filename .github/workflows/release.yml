@@ -1,4 +1,4 @@
-name: Build Release Zip
+name: Build and Publish Release
 
 permissions:
   contents: read
@@ -7,13 +7,18 @@ env:
   DOTNET_CLI_TELEMETRY_OPTOUT: '1'
   DOTNET_NOLOGO: 'true'
 
+concurrency:
+  group: release-${{ github.event_name == 'push' && github.ref_name || inputs.tag || github.run_id }}
+  cancel-in-progress: false
+
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - 'v*.*.*'
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag to package for
+        description: Existing vX.Y.Z tag to build and publish (leave blank for an artifact-only test build)
         required: false
         type: string
 
@@ -21,10 +26,11 @@ jobs:
   build_release_zip:
     runs-on: windows-latest
     outputs:
-      attach_release: ${{ steps.build.outputs.attach_release }}
+      publish_release: ${{ steps.build.outputs.publish_release }}
       artifact_name: ${{ steps.build.outputs.artifact_name }}
       checksum_name: ${{ steps.build.outputs.checksum_name }}
       release_tag: ${{ steps.build.outputs.release_tag }}
+      resolved_commit: ${{ steps.verify_ref.outputs.resolved_commit }}
       zip_name: ${{ steps.build.outputs.zip_name }}
 
     steps:
@@ -33,15 +39,15 @@ jobs:
         shell: pwsh
         env:
           EVENT_NAME: ${{ github.event_name }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          PUSH_TAG: ${{ github.ref_name }}
           REQUESTED_TAG: ${{ inputs.tag }}
           RUN_NUMBER: ${{ github.run_number }}
           SOURCE_SHA: ${{ github.sha }}
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $tag = if ($env:EVENT_NAME -eq 'release') {
-            $env:RELEASE_TAG
+          $tag = if ($env:EVENT_NAME -eq 'push') {
+            $env:PUSH_TAG
           } else {
             $env:REQUESTED_TAG
           }
@@ -61,11 +67,11 @@ jobs:
             $versionLabel = $tag
             $assemblyVersion = "$version.0"
             $informationalVersion = $version
-            $attachRelease = 'true'
+            $publishRelease = 'true'
             $releaseTag = $tag
           } else {
             if ($env:EVENT_NAME -ne 'workflow_dispatch') {
-              throw 'A release event must provide a vX.Y.Z tag.'
+              throw 'Only a tag push or manual workflow run can build a release.'
             }
 
             $shortSha = $env:SOURCE_SHA.Substring(0, 7)
@@ -74,7 +80,7 @@ jobs:
             $versionLabel = "manual-$env:RUN_NUMBER"
             $assemblyVersion = '0.0.0.0'
             $informationalVersion = "$version+$shortSha"
-            $attachRelease = 'false'
+            $publishRelease = 'false'
             $releaseTag = ''
           }
 
@@ -83,7 +89,7 @@ jobs:
           $checksumName = "$zipName.sha256"
 
           "assembly_version=$assemblyVersion" >> $env:GITHUB_OUTPUT
-          "attach_release=$attachRelease" >> $env:GITHUB_OUTPUT
+          "publish_release=$publishRelease" >> $env:GITHUB_OUTPUT
           "artifact_name=$artifactName" >> $env:GITHUB_OUTPUT
           "checksum_name=$checksumName" >> $env:GITHUB_OUTPUT
           "checkout_ref=$checkoutRef" >> $env:GITHUB_OUTPUT
@@ -101,6 +107,7 @@ jobs:
           ref: ${{ steps.build.outputs.checkout_ref }}
 
       - name: Verify checked-out reference
+        id: verify_ref
         shell: pwsh
         env:
           EXPECTED_REF: ${{ steps.build.outputs.checkout_ref }}
@@ -118,6 +125,7 @@ jobs:
           if ($actualCommit -ne $expectedCommit) {
             throw "Checkout mismatch: expected $expectedCommit but found $actualCommit."
           }
+          "resolved_commit=$actualCommit" >> $env:GITHUB_OUTPUT
 
       - name: Verify native-only dependency boundary
         shell: pwsh
@@ -362,9 +370,9 @@ jobs:
             .\artifacts\${{ steps.build.outputs.zip_name }}
             .\artifacts\${{ steps.build.outputs.checksum_name }}
 
-  attach_release:
+  publish_release:
     needs: build_release_zip
-    if: needs.build_release_zip.outputs.attach_release == 'true'
+    if: needs.build_release_zip.outputs.publish_release == 'true'
     runs-on: windows-latest
     permissions:
       contents: write
@@ -376,16 +384,121 @@ jobs:
           name: ${{ needs.build_release_zip.outputs.artifact_name }}
           path: .\artifacts
 
-      - name: Attach zip to GitHub release
+      - name: Create draft, attach verified assets, then publish
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           CHECKSUM_NAME: ${{ needs.build_release_zip.outputs.checksum_name }}
           RELEASE_TAG: ${{ needs.build_release_zip.outputs.release_tag }}
+          RESOLVED_COMMIT: ${{ needs.build_release_zip.outputs.resolved_commit }}
           ZIP_NAME: ${{ needs.build_release_zip.outputs.zip_name }}
         run: |
           $ErrorActionPreference = 'Stop'
           $zipPath = Join-Path .\artifacts $env:ZIP_NAME
           $checksumPath = Join-Path .\artifacts $env:CHECKSUM_NAME
+
+          $currentTagCommit = (gh api "repos/$env:GH_REPO/commits/$env:RELEASE_TAG" --jq .sha).Trim()
+          if ($LASTEXITCODE -ne 0 -or $currentTagCommit -ne $env:RESOLVED_COMMIT) {
+            throw "Tag $env:RELEASE_TAG no longer resolves to the commit that produced these assets."
+          }
+
+          $checksumText = [System.IO.File]::ReadAllText($checksumPath).Trim().TrimStart([char]0xFEFF)
+          $escapedZipName = [System.Text.RegularExpressions.Regex]::Escape($env:ZIP_NAME)
+          if ($checksumText -cnotmatch "^(?<hash>[0-9a-f]{64})  $escapedZipName$") {
+            throw 'The downloaded checksum sidecar has an unexpected format or filename.'
+          }
+          $localZipHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($localZipHash -cne $Matches['hash']) {
+            throw 'The downloaded workflow ZIP does not match its SHA-256 sidecar.'
+          }
+          $localChecksumHash = (Get-FileHash -LiteralPath $checksumPath -Algorithm SHA256).Hash.ToLowerInvariant()
+
+          $existingRelease = $null
+          $ErrorActionPreference = 'Continue'
+          $releaseJson = gh release view $env:RELEASE_TAG --repo $env:GH_REPO --json isDraft,isPrerelease,assets 2>$null
+          $viewExitCode = $LASTEXITCODE
+          $ErrorActionPreference = 'Stop'
+          if ($viewExitCode -eq 0) {
+            $existingRelease = $releaseJson | ConvertFrom-Json
+            if (-not $existingRelease.isDraft) {
+              throw "Release $env:RELEASE_TAG is already public. Refusing to replace immutable public assets."
+            }
+            if ($existingRelease.isPrerelease) {
+              throw "Release $env:RELEASE_TAG is a pre-release draft. Refusing to publish it as the stable update channel."
+            }
+          } elseif ($viewExitCode -ne 1) {
+            throw "Unable to determine whether release $env:RELEASE_TAG already exists."
+          }
+
+          if ($null -eq $existingRelease) {
+            gh release create $env:RELEASE_TAG `
+              --draft `
+              --verify-tag `
+              --title $env:RELEASE_TAG `
+              --generate-notes `
+              --repo $env:GH_REPO
+            if ($LASTEXITCODE -ne 0) {
+              throw "Unable to create draft release $env:RELEASE_TAG."
+            }
+          }
+
+          # Assets are only mutable while the release is a draft. Publishing is
+          # the final operation, after build, tests, package verification and upload.
           gh release upload $env:RELEASE_TAG $zipPath $checksumPath --clobber --repo $env:GH_REPO
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to attach the verified release assets. The release remains a draft."
+          }
+
+          $release = gh release view $env:RELEASE_TAG --repo $env:GH_REPO --json isDraft,isPrerelease,assets |
+            ConvertFrom-Json
+          if (-not $release.isDraft) {
+            throw "Release $env:RELEASE_TAG became public before verification completed."
+          }
+          if ($release.isPrerelease) {
+            throw "Draft release $env:RELEASE_TAG is marked as a pre-release and will not be published."
+          }
+
+          $expectedAssetNames = @($env:ZIP_NAME, $env:CHECKSUM_NAME) | Sort-Object
+          $assetNames = @($release.assets | ForEach-Object { $_.name }) | Sort-Object
+          if ($assetNames.Count -ne $expectedAssetNames.Count) {
+            throw "Draft release contains unexpected or missing assets: $($assetNames -join ', ')."
+          }
+          for ($index = 0; $index -lt $expectedAssetNames.Count; $index++) {
+            if (-not $assetNames[$index].Equals(
+                $expectedAssetNames[$index],
+                [System.StringComparison]::Ordinal)) {
+              throw "Draft release asset set is not exact: $($assetNames -join ', ')."
+            }
+          }
+
+          foreach ($localAssetPath in @($zipPath, $checksumPath)) {
+            $localAsset = Get-Item -LiteralPath $localAssetPath
+            $remoteAsset = @($release.assets | Where-Object {
+              $_.name.Equals($localAsset.Name, [System.StringComparison]::Ordinal)
+            })
+            if ($remoteAsset.Count -ne 1 -or [long]$remoteAsset[0].size -ne $localAsset.Length) {
+              throw "Uploaded asset $($localAsset.Name) does not match the local verified file size."
+            }
+
+            $expectedDigest = if ($localAsset.Name -ceq $env:ZIP_NAME) {
+              "sha256:$localZipHash"
+            } else {
+              "sha256:$localChecksumHash"
+            }
+            if ($remoteAsset[0].PSObject.Properties.Name -contains 'digest' -and
+                -not [string]::IsNullOrWhiteSpace($remoteAsset[0].digest) -and
+                $remoteAsset[0].digest -cne $expectedDigest) {
+              throw "Uploaded asset $($localAsset.Name) does not match the local SHA-256 digest."
+            }
+          }
+
+          $finalTagCommit = (gh api "repos/$env:GH_REPO/commits/$env:RELEASE_TAG" --jq .sha).Trim()
+          if ($LASTEXITCODE -ne 0 -or $finalTagCommit -ne $env:RESOLVED_COMMIT) {
+            throw "Tag $env:RELEASE_TAG changed after asset verification. The release remains a draft."
+          }
+
+          gh release edit $env:RELEASE_TAG --draft=false --repo $env:GH_REPO
+          if ($LASTEXITCODE -ne 0) {
+            throw "Verified assets were attached, but the release could not be published and remains a draft."
+          }

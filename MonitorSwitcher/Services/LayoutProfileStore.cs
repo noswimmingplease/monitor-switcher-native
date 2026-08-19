@@ -58,6 +58,14 @@ namespace WorkMonitorSwitcher.Services
             var warnings = new List<string>();
             var targets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+            var deletionRecovery = LayoutProfileDeletionTransaction.Recover(
+                _profilesDir,
+                _indexPath);
+            if (!deletionRecovery.Success)
+                errors.Add(deletionRecovery.ErrorMessage);
+            else if (!string.IsNullOrWhiteSpace(deletionRecovery.WarningMessage))
+                warnings.Add(deletionRecovery.WarningMessage);
+
             try
             {
                 var legacyPath = Path.GetFullPath(_legacyLayoutPath);
@@ -105,7 +113,7 @@ namespace WorkMonitorSwitcher.Services
                     $"Unable to enumerate layout profile transactions: {ex.Message}");
             }
 
-            bool changed = false;
+            bool changed = deletionRecovery.Success && deletionRecovery.Changed;
             foreach (var target in targets)
             {
                 var result = LayoutProfileTransaction.Recover(target);
@@ -159,41 +167,54 @@ namespace WorkMonitorSwitcher.Services
             if (name.Equals(DefaultProfileName, StringComparison.OrdinalIgnoreCase))
                 return PersistenceResult.Failed("The Default layout profile cannot be deleted.");
 
+            string layoutPath;
+            try
+            {
+                layoutPath = Path.GetFullPath(GetLayoutPath(name));
+                var profilesDirectory = Path.GetFullPath(_profilesDir);
+                if (!PathEquals(Path.GetDirectoryName(layoutPath), profilesDirectory))
+                    return PersistenceResult.Failed("The resolved layout profile path is outside the profiles directory.");
+            }
+            catch (Exception ex)
+            {
+                return PersistenceResult.Failed($"Unable to resolve layout profile files: {ex.Message}");
+            }
+
+            var saveRecovery = LayoutProfileTransaction.Recover(layoutPath);
+            if (!saveRecovery.Success)
+            {
+                return PersistenceResult.Failed(
+                    $"The profile cannot be deleted because its interrupted save could not be recovered. " +
+                    saveRecovery.ErrorMessage);
+            }
+
+            string saveJournalPath = LayoutProfileTransaction.GetJournalPath(layoutPath);
+            if (File.Exists(saveJournalPath))
+            {
+                var recoveryWarning = string.IsNullOrWhiteSpace(saveRecovery.WarningMessage)
+                    ? string.Empty
+                    : $" {saveRecovery.WarningMessage}";
+                return PersistenceResult.Failed(
+                    "The profile cannot be deleted while its completed save journal still requires cleanup." +
+                    recoveryWarning);
+            }
+
             var originalNames = LoadProfileNames();
             var remainingNames = originalNames
                 .Where(n => !n.Equals(name, StringComparison.OrdinalIgnoreCase))
                 .ToList();
 
-            var indexResult = SaveProfileNamesWithResult(remainingNames);
-            if (!indexResult.Success)
-                return indexResult;
+            var deletion = DeleteProfileArtifacts(name, originalNames, remainingNames);
+            if (!deletion.Success || string.IsNullOrWhiteSpace(saveRecovery.WarningMessage))
+                return deletion;
 
-            var deleteResult = DeleteProfileArtifacts(name);
-            if (!deleteResult.Success)
-            {
-                var rollback = SaveProfileNamesWithResult(originalNames);
-                var rollbackMessage = rollback.Success
-                    ? string.Empty
-                    : $" The profile index rollback also failed: {rollback.ErrorMessage}";
-                return PersistenceResult.Failed(deleteResult.ErrorMessage + rollbackMessage);
-            }
-
-            // Once the profile artefacts are gone, the previous index is no longer
-            // a safe recovery point because it would resurrect the deleted name.
-            var backupResult = AtomicFileWriter.SynchronizeBackupWithPrimary(
-                _indexPath,
-                contents => JsonFilePersistence.TryDeserialize<List<string>>(
-                    contents,
-                    value => value != null,
-                    out _));
-
+            var warning = string.Join(
+                " ",
+                new[] { saveRecovery.WarningMessage, deletion.WarningMessage }
+                    .Where(message => !string.IsNullOrWhiteSpace(message)));
             return PersistenceResult.Saved(
-                changed: indexResult.Changed || deleteResult.Changed || backupResult.Changed,
-                warningMessage: CombineWarnings(
-                    CombineWarnings(indexResult.WarningMessage, deleteResult.WarningMessage),
-                    backupResult.Success
-                        ? backupResult.WarningMessage
-                        : $"The profile was deleted, but the profile-index backup could not be updated: {backupResult.ErrorMessage}"));
+                changed: saveRecovery.Changed || deletion.Changed,
+                warningMessage: warning);
         }
 
         public static string NormalizeProfileName(string? profileName)
@@ -205,6 +226,14 @@ namespace WorkMonitorSwitcher.Services
             foreach (var c in Path.GetInvalidFileNameChars())
                 value = value.Replace(c, '_');
 
+            // Win32 strips trailing spaces and full stops and treats the device
+            // stem as reserved even when an extension is present (for example,
+            // CON.foo). Canonicalise both cases before deriving a file path so
+            // two visible profile names cannot alias the same filesystem entry.
+            value = value.TrimEnd(' ', '.');
+            if (string.IsNullOrWhiteSpace(value))
+                return DefaultProfileName;
+
             if (value.Equals(DefaultProfileName, StringComparison.OrdinalIgnoreCase))
                 return DefaultProfileName;
 
@@ -214,7 +243,8 @@ namespace WorkMonitorSwitcher.Services
                 "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
                 "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
             };
-            if (reservedNames.Contains(value))
+            var deviceStem = value.Split('.', 2)[0];
+            if (reservedNames.Contains(deviceStem))
                 value = "_" + value;
 
             return string.IsNullOrWhiteSpace(value) ? DefaultProfileName : value;
@@ -245,7 +275,10 @@ namespace WorkMonitorSwitcher.Services
             }
         }
 
-        private PersistenceResult DeleteProfileArtifacts(string profileName)
+        private PersistenceResult DeleteProfileArtifacts(
+            string profileName,
+            IReadOnlyCollection<string> originalNames,
+            IReadOnlyCollection<string> remainingNames)
         {
             string layoutPath;
             string profilesDirectory;
@@ -303,61 +336,13 @@ namespace WorkMonitorSwitcher.Services
                         existingFiles.Add(fullCandidate);
                 }
 
-                var operationId = Guid.NewGuid().ToString("N");
-                var stagedFiles = new List<(string OriginalPath, string StagedPath)>();
-                try
-                {
-                    foreach (var originalPath in existingFiles)
-                    {
-                        var stagedPath = Path.Combine(
-                            profilesDirectory,
-                            $".{Path.GetFileName(originalPath)}.{operationId}.deleting");
-                        File.Move(originalPath, stagedPath);
-                        stagedFiles.Add((originalPath, stagedPath));
-                    }
-                }
-                catch (Exception stagingException)
-                {
-                    var rollbackErrors = new List<string>();
-                    foreach (var staged in stagedFiles.AsEnumerable().Reverse())
-                    {
-                        try
-                        {
-                            if (File.Exists(staged.StagedPath))
-                                File.Move(staged.StagedPath, staged.OriginalPath);
-                        }
-                        catch (Exception rollbackException)
-                        {
-                            rollbackErrors.Add(
-                                $"Could not restore '{staged.OriginalPath}': {rollbackException.Message}");
-                        }
-                    }
-
-                    var rollbackDetail = rollbackErrors.Count == 0
-                        ? string.Empty
-                        : $" Rollback issue(s): {string.Join(" ", rollbackErrors)}";
-                    return PersistenceResult.Failed(
-                        $"Unable to stage layout profile '{profileName}' for deletion: " +
-                        $"{stagingException.Message}.{rollbackDetail}");
-                }
-
-                var cleanupWarnings = new List<string>();
-                foreach (var staged in stagedFiles)
-                {
-                    try
-                    {
-                        File.Delete(staged.StagedPath);
-                    }
-                    catch (Exception cleanupException)
-                    {
-                        cleanupWarnings.Add(
-                            $"A staged deleted artefact remains at '{staged.StagedPath}': {cleanupException.Message}");
-                    }
-                }
-
-                return PersistenceResult.Saved(
-                    changed: stagedFiles.Count > 0,
-                    warningMessage: string.Join(" ", cleanupWarnings));
+                return LayoutProfileDeletionTransaction.Delete(
+                    profilesDirectory,
+                    _indexPath,
+                    profileName,
+                    originalNames,
+                    remainingNames,
+                    existingFiles);
             }
             catch (Exception ex)
             {
@@ -365,7 +350,7 @@ namespace WorkMonitorSwitcher.Services
             }
         }
 
-        private static bool IsExpectedAutoSaveBackup(string layoutPath, string candidatePath)
+        internal static bool IsExpectedAutoSaveBackup(string layoutPath, string candidatePath)
         {
             var expectedDirectory = Path.GetDirectoryName(Path.GetFullPath(layoutPath));
             var candidateDirectory = Path.GetDirectoryName(Path.GetFullPath(candidatePath));
@@ -387,13 +372,6 @@ namespace WorkMonitorSwitcher.Services
                    .Equals(
                        Path.GetFullPath(right).TrimEnd(Path.DirectorySeparatorChar),
                        StringComparison.OrdinalIgnoreCase);
-
-        private static string CombineWarnings(string first, string second)
-        {
-            if (string.IsNullOrWhiteSpace(first)) return second ?? string.Empty;
-            if (string.IsNullOrWhiteSpace(second)) return first;
-            return $"{first} {second}";
-        }
 
         private static string SanitizeFileName(string name)
             => NormalizeProfileName(name);

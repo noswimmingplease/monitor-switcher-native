@@ -8,24 +8,37 @@
 - Profiles now control only which physical monitors are enabled. Profile changes, reconnects and direct Enable actions no longer reapply saved position, resolution, rotation or preferred-primary state.
 - Windows Display Settings is now authoritative for monitor arrangement. Profile application asks Windows to use its persisted configuration for the requested physical monitor set and is a no-op when that set is already active.
 - Profile application still requires and verifies an exact physical monitor set, so a partial activation cannot be reported as successful.
+- Monitor activation now also verifies retained displays' orientation, effective size, relative placement and retained primary selection, and rolls back if Windows changes them unexpectedly.
+- Profile previews now use the latest reliable physical detection and list present disabled saved monitors under **Enable** instead of **Unavailable**.
+- Native profiles no longer treat a serial number alone as physical identity, preventing an absent saved monitor from being replaced by a connected twin that reports the same serial.
 - Added a main-window profile selector. The Apply button is highlighted only when the selected valid profile differs from the reliably detected active monitor set.
+- The notification-area **Apply Selected Profile** action now uses the same profile validity, detection and busy-state preflight as the main Apply button.
+- All profile-application routes now honour display rollback quarantine, including **Save & Apply** from Settings, without blocking ordinary preference changes.
 - Native profile validation, cancellation and invalid topology results are no longer reported as successful saves or restores.
 - Start-up restores are cancelled when a manual display action begins, and launching a portable or rollback copy no longer retargets the existing Windows start-up entry.
+- Settings now shows a different or unrecognised Windows start-up entry explicitly and leaves it untouched unless the user changes that option.
 - Corrupt or missing JSON settings recover from valid backups without replacing the good backup.
 - Profile deletion now removes exact sidecars/backups transactionally and cannot resurrect a deleted index entry during backup recovery.
+- Profile deletion now recovers or refuses an outstanding save journal before removing any profile artefact.
 - Removed automatic profile overwrites before disabling a monitor. Profiles now change only when explicitly saved.
+- Settings no longer discards preferred-primary metadata merely because that field is not currently editable in the monitor table.
 
 ### Improved
 
 - Monitor detection and layout work now runs asynchronously with shutdown cancellation and a visible degraded-detection warning.
 - Added versioned native profiles. Legacy profiles are upgraded by an explicit save while retaining the previous valid profile for rollback.
 - Reorganised Settings into compact themed General, Monitors and Profiles sections with consistent Save and Cancel actions. Selected-monitor information now sits below a monitor-count-aware list and expands to show its complete identity record without an internal scrollbar, while the title bar retains its theme when inactive.
-- Duplicate credible monitor serials now make native detection fail closed; placeholder or missing serials use exact current target paths where that remains unambiguous.
+- Displays that share a credible monitor serial now use unique Windows instance or native-target identities; detection still fails closed when Windows cannot disambiguate them safely.
+- Alias migration requires corroborating CCD, PnP or registry identity; a serial reported by a disconnected duplicate cannot claim another monitor's alias.
 - Large monitor lists are vertically scrollable and bounded to the current working area.
 - Refreshed the light and dark themes with clearer hierarchy, accessible primary actions, semantic status badges, softer monitor cards, and a proper degraded-detection banner.
 - Repeated monitor refreshes now release dynamic tooltip registrations and rounded-card drawing resources immediately.
 - Added a confirmed Clear Diagnostics action that removes both the saved log and its temporary exported copy, with partial failures reported to the user.
 - Added explicit Windows CI/release regression execution, deterministic release versioning, SHA-256 release sidecars, and expanded rollback-focused coverage.
+- Renamed **Update App** to **Check for Updates** and made the complete network operation cancellable and time-bounded. Verified releases are deduplicated under per-user local application data, with progress and cleanup failures shown without freezing Settings.
+- Cached updates retain the verified release archive and are rechecked against the current published checksum; extracted files are verified from that archive rather than trusting writable local metadata.
+- Release automation now builds and tests tagged code before attaching assets to a draft; publishing is the final step and public release assets are never replaced.
+- Improved Settings keyboard navigation, accessible section state, high-DPI action wrapping and working-area clamping.
 
 ## v0.3.9 - 2026-07-06
 

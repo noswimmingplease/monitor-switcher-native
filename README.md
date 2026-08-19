@@ -39,7 +39,7 @@ Settings is split into compact **General**, **Monitors** and **Profiles** sectio
 - Dark mode and always-on-top toggles.
 - Minimise-to-tray, start-with-Windows, apply-profile-on-app-start and confirm-before-disable options.
 - **Open Registry**, including double-click support for a monitor registry-key cell.
-- **Update App** for downloading the latest stable GitHub release. The updater requires the exact release archive and matching `.sha256`, validates both, and extracts the update separately without replacing the running installation.
+- **Check for Updates** for downloading the latest stable GitHub release. It requires the exact release archive and matching `.sha256`, validates both, and extracts one verified copy per version under `%LOCALAPPDATA%\MonitorSwitcher\Updates`. The verified archive is retained so a cached copy can be checked again without trusting mutable local metadata. It does not replace the running installation or change Start-menu or start-up shortcuts.
 - A monitor identity details panel, recent diagnostics and a guarded option to clear the saved diagnostics log.
 
 ## Layout Profiles
@@ -47,6 +47,8 @@ Settings is split into compact **General**, **Monitors** and **Profiles** sectio
 Use the profile selector on the main window to choose a saved monitor set. Selection alone does not change any monitors. **Apply** is highlighted and enabled only when reliable detection confirms that the selected profile differs from the active physical monitor set. Press **Save** to name and capture the currently enabled monitor set. Selecting a different profile in Settings changes the Settings action to **Save & Apply**, which saves the settings and applies that monitor set as one guarded operation.
 
 Native profiles are versioned, app-owned configuration documents. Each active display records its strong physical identity and CCD route. Existing geometry fields remain in the file format for compatibility, but applying a profile does not use them. Profile replacement is transactional: an interrupted write is recovered or rolled back as a matched unit, and the previous valid profile is retained as a `.bak` file.
+
+Profile application does not identify a display by EDID serial alone, because some monitors report the same serial. If a monitor is moved to a different connector and all of its native Windows identities change, save that profile again; the app fails closed rather than enabling a possibly different display.
 
 Apply validates the complete requested physical monitor set, asks Windows to use its own persisted arrangement for that set, then queries Windows again to verify the active set. It does not apply saved coordinates, rotation, resolution or preferred-primary state. Rearrange monitors in Windows Display Settings; those Windows settings remain authoritative.
 
@@ -65,6 +67,14 @@ Per-user data is stored under:
 ```
 
 The default layout remains at `monitor-layout.cfg` for compatibility; named profiles are in the `layouts` directory. The file extension is historical—the native configuration format is versioned and human-readable. Settings, aliases, the profile index and monitor identity data are also written atomically and recovered from a valid backup when possible.
+
+Verified releases downloaded by **Check for Updates** are stored separately under:
+
+```text
+%LOCALAPPDATA%\MonitorSwitcher\Updates
+```
+
+The current installation may therefore be read-only. Before a downloaded release is reused, its retained release archive is hashed against a freshly downloaded published checksum and every extracted file is compared with the file tree derived from that trusted archive. The local cache manifest is also checked, but is not the trust anchor.
 
 An older default layout beside `MonitorSwitcher.exe` is considered for one-time migration into the per-user directory. The application does not write profiles into its installation directory.
 
@@ -89,7 +99,11 @@ CI builds the full solution and runs this command for every push and pull reques
 
 ## Releases
 
-GitHub releases are self-contained Windows x64 zip archives. Tagged `vX.Y.Z` builds use `X.Y.Z` in the application metadata and retain the tag in the archive name. There is currently no installer: extract the zip to a folder and run `MonitorSwitcher.exe`.
+GitHub releases are self-contained Windows x64 zip archives. Tagged `vX.Y.Z` builds use `X.Y.Z` in the application metadata and retain the tag in the archive name. There is currently no installer: extract the zip to a folder and run `MonitorSwitcher.exe`. **Check for Updates** automates the download, verification and extraction stages only.
+
+Release executables are not currently Authenticode-signed, so Windows may show an **Unknown publisher** or SmartScreen reputation prompt. Code signing requires a separately protected publisher certificate and is planned as release infrastructure rather than being simulated in the application.
+
+Release automation builds and tests the tag before creating a draft release. It attaches and verifies both assets while the release is still a draft, then publishes it as the final operation. An already-public release is never overwritten, which keeps the workflow compatible with immutable GitHub releases.
 
 Release archives include `LICENSE`, `README.md`, `RELEASE_NOTES.md`, `THIRD-PARTY-NOTICES.md` and the exact resolved .NET runtime notices in `DOTNET-RUNTIME-THIRD-PARTY-NOTICES.txt`, with a matching `.sha256` checksum asset. They contain Monitor Switcher and the Microsoft .NET runtime required for a self-contained build; no separate monitor-control executable or package dependency is included.
 

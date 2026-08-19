@@ -83,6 +83,9 @@ var tests = new List<(string Name, Action Body)>
 
 NativeDetectionTests.RunAll((name, body) => tests.Add((name, body)));
 tests.AddRange(NativeTopologyTests.GetTests());
+tests.AddRange(CoreServiceHardeningTests.GetTests());
+tests.AddRange(FormAccessibilityHardeningTests.GetTests());
+tests.AddRange(UpdaterTests.GetTests());
 
 var failures = new List<string>();
 foreach (var test in tests)

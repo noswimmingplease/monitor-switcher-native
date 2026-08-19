@@ -95,7 +95,54 @@ namespace WorkMonitorSwitcher.Services
 
     internal sealed class ThemedButton : Button
     {
+        private bool _accessibilitySelected;
+
         public ThemedButtonTone Tone { get; set; }
+
+        /// <summary>
+        /// Exposes a real MSAA/UI Automation selected state when this button is
+        /// used as a custom page tab. Visual tone alone is not discoverable by
+        /// screen readers.
+        /// </summary>
+        public bool AccessibilitySelected
+        {
+            get => _accessibilitySelected;
+            set
+            {
+                if (_accessibilitySelected == value)
+                    return;
+
+                _accessibilitySelected = value;
+                AccessibilityNotifyClients(AccessibleEvents.StateChange, -1);
+            }
+        }
+
+        protected override AccessibleObject CreateAccessibilityInstance()
+            => new ThemedButtonAccessibleObject(this);
+
+        private sealed class ThemedButtonAccessibleObject : ControlAccessibleObject
+        {
+            private readonly ThemedButton _owner;
+
+            public ThemedButtonAccessibleObject(ThemedButton owner)
+                : base(owner)
+            {
+                _owner = owner;
+            }
+
+            public override AccessibleStates State
+            {
+                get
+                {
+                    var state = base.State;
+                    if (_owner.AccessibleRole == AccessibleRole.PageTab)
+                        state |= AccessibleStates.Selectable;
+                    if (_owner.AccessibilitySelected)
+                        state |= AccessibleStates.Selected;
+                    return state;
+                }
+            }
+        }
     }
 
     internal sealed class ThemedCardPanel : Panel
@@ -170,8 +217,10 @@ namespace WorkMonitorSwitcher.Services
                 true);
             BackColor = Color.Transparent;
             Cursor = Cursors.Hand;
-            TabStop = false;
-            AccessibleName = "Drag to reorder monitor";
+            TabStop = true;
+            AccessibleRole = AccessibleRole.Grip;
+            AccessibleName = "Reorder monitor";
+            AccessibleDescription = "Drag with the mouse, or press Alt plus Up or Alt plus Down to move this monitor card.";
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -183,12 +232,36 @@ namespace WorkMonitorSwitcher.Services
                 StartCap = LineCap.Round,
                 EndCap = LineCap.Round
             };
-            int left = Math.Max(2, (Width - 14) / 2);
-            int right = Math.Min(Width - 2, left + 14);
+            int barWidth = Math.Max(10, (int)Math.Round(Width * 0.58));
+            int left = Math.Max(2, (Width - barWidth) / 2);
+            int right = Math.Min(Width - 2, left + barWidth);
             int centreY = Height / 2;
-            for (int offset = -7; offset <= 7; offset += 7)
+            int spacing = Math.Max(6, Height / 10);
+            for (int offset = -spacing; offset <= spacing; offset += spacing)
                 e.Graphics.DrawLine(pen, left, centreY + offset, right, centreY + offset);
+
+            if (Focused && ShowFocusCues)
+            {
+                var focusBounds = ClientRectangle;
+                focusBounds.Inflate(-2, -2);
+                ControlPaint.DrawFocusRectangle(e.Graphics, focusBounds, ForeColor, BackColor);
+            }
         }
+
+        protected override void OnGotFocus(EventArgs e)
+        {
+            base.OnGotFocus(e);
+            Invalidate();
+        }
+
+        protected override void OnLostFocus(EventArgs e)
+        {
+            base.OnLostFocus(e);
+            Invalidate();
+        }
+
+        protected override bool IsInputKey(Keys keyData)
+            => (keyData & Keys.KeyCode) is Keys.Up or Keys.Down || base.IsInputKey(keyData);
     }
 
     internal sealed class StatusBadge : Label

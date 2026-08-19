@@ -4,6 +4,7 @@
 		<OutputType>WinExe</OutputType>
 		<TargetFramework>net8.0-windows</TargetFramework>
 		<UseWindowsForms>true</UseWindowsForms>
+		<ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
 		<Nullable>enable</Nullable>
 		<Deterministic>true</Deterministic>
 		<ApplicationIcon>MonitorSwitcher_transparent.ico</ApplicationIcon>

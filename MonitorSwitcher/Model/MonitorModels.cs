@@ -31,6 +31,7 @@ namespace WorkMonitorSwitcher.Model
         public string? LastSerialNumber { get; set; }      // Last seen EDID serial
         public string? LastInstanceId { get; set; }        // Last seen PnP instance id
         public string? LastMonitorId { get; set; }         // Last seen EDID model/product
+        public string? LastNativeTargetPath { get; set; }  // Last seen CCD physical target path
 
         // Optional UI hints
         public int? PreferredOrder { get; set; }           // Optional pin for row ordering

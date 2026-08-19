@@ -6,19 +6,14 @@ using System.Drawing;
 using System.Linq;
 using System.Diagnostics;
 using System.IO;
-using System.IO.Compression;
-using System.Net.Http;
-using System.Net.Http.Headers;
 using System.Reflection;
-using System.Security.Cryptography;
-using System.Text;
-using System.Text.Json;
-using System.Text.Json.Serialization;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Win32;
 using WorkMonitorSwitcher.Model;
 using WorkMonitorSwitcher.Services;
+using WorkMonitorSwitcher.UI;
 
 namespace WorkMonitorSwitcher
 {
@@ -43,7 +38,14 @@ namespace WorkMonitorSwitcher
         private readonly Button _cancel = new() { Text = "Cancel", DialogResult = DialogResult.Cancel, AutoSize = true };
         private readonly Button _remove = new ThemedButton { Text = "Remove Selected", AutoSize = true, Tone = ThemedButtonTone.Danger };
         private readonly Button _openRegistry = new() { Text = "Open Registry", AutoSize = true };
-        private readonly Button _updateApp = new() { Text = "Update App", AutoSize = true };
+        private readonly Button _updateApp = new() { Text = "Check for Updates", AutoSize = true };
+        private readonly Label _updateStatus = new()
+        {
+            AutoSize = true,
+            Visible = false,
+            UseMnemonic = false,
+            AccessibleName = "Update status"
+        };
         private readonly Button _showDiagnostics = new() { Text = "Diagnostics", AutoSize = true };
         private readonly Button _clearDiagnostics = new ThemedButton { Text = "Clear Diagnostics", AutoSize = true, Tone = ThemedButtonTone.Danger };
         private readonly CheckBox _chkDark = new() { Text = "Dark mode", AutoSize = true };
@@ -72,21 +74,12 @@ namespace WorkMonitorSwitcher
         private string _selectedLayoutProfile;
         private ContextMenuStrip? _layoutProfileMenu;
         private readonly ToolTip _toolTip = new() { InitialDelay = 350, ReshowDelay = 100, AutoPopDelay = 8000 };
-        private static readonly HttpClient Http = new(new HttpClientHandler
-        {
-            AllowAutoRedirect = false,
-            CheckCertificateRevocationList = true
-        })
-        {
-            Timeout = TimeSpan.FromMinutes(5)
-        };
-        private static readonly Uri LatestReleaseApiUri = new("https://api.github.com/repos/Ci303/monitor-switcher-native/releases/latest");
-        private const long MaxReleaseApiBytes = 2L * 1024 * 1024;
-        private const long MaxChecksumBytes = 16L * 1024;
-        private const long MaxAppArchiveBytes = 300L * 1024 * 1024;
-        private const long MaxAppExpandedBytes = 750L * 1024 * 1024;
-        private const int MaxAppArchiveEntries = 5000;
-        private const ushort PeMachineAmd64 = 0x8664;
+        private readonly AppUpdateService _updateService;
+        private readonly bool _ownsUpdateService;
+        private readonly CheckState _initialStartupCheckState;
+        private CancellationTokenSource? _updateCancellation;
+        private bool _updateInProgress;
+        private static readonly TimeSpan UpdateOperationTimeout = TimeSpan.FromMinutes(5);
 
         public Dictionary<string, string> UpdatedMappings { get; } = new(StringComparer.OrdinalIgnoreCase);
         public HashSet<string> RemovedKeys { get; } = new(StringComparer.OrdinalIgnoreCase);
@@ -101,12 +94,12 @@ namespace WorkMonitorSwitcher
         public string? SelectedLayoutProfileResult { get; private set; }
         public HashSet<string> RemovedLayoutProfiles { get; } = new(StringComparer.OrdinalIgnoreCase);
 
-        public AliasSettingsForm(
+        internal AliasSettingsForm(
             List<AliasViewRow> current,
             bool darkMode,
             bool alwaysOnTop,
             bool minimizeToTray,
-            bool startWithWindows,
+            StartupRegistrationState startupRegistrationState,
             bool confirmBeforeDisable,
             bool restoreLayoutOnStartup,
             List<string> layoutProfiles,
@@ -114,6 +107,7 @@ namespace WorkMonitorSwitcher
             string diagnosticsText,
             Func<string>? readDiagnostics = null,
             Func<string?>? clearDiagnosticsLog = null,
+            AppUpdateService? updateService = null,
             Form? sizingOwner = null)
 
         {
@@ -123,6 +117,8 @@ namespace WorkMonitorSwitcher
                 : diagnosticsText;
             _readDiagnostics = readDiagnostics;
             _clearDiagnosticsLog = clearDiagnosticsLog;
+            _updateService = updateService ?? AppUpdateService.CreateDefault();
+            _ownsUpdateService = updateService == null;
             _layoutProfileNames = layoutProfiles
                 .Where(p => !string.IsNullOrWhiteSpace(p))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -140,7 +136,8 @@ namespace WorkMonitorSwitcher
             StartPosition = FormStartPosition.CenterParent;
             FormBorderStyle = FormBorderStyle.Sizable;
             MaximizeBox = true;
-            MinimizeBox = true;
+            MinimizeBox = false;
+            AutoScaleMode = AutoScaleMode.Dpi;
             ShowIcon = true;
             try
             {
@@ -155,7 +152,16 @@ namespace WorkMonitorSwitcher
             _chkDark.Checked = darkMode;
             _chkTopMost.Checked = alwaysOnTop;
             _chkTray.Checked = minimizeToTray;
-            _chkStartup.Checked = startWithWindows;
+            _chkStartup.ThreeState = true;
+            _initialStartupCheckState = startupRegistrationState switch
+            {
+                StartupRegistrationState.CurrentExecutable => CheckState.Checked,
+                StartupRegistrationState.OtherExecutable => CheckState.Indeterminate,
+                _ => CheckState.Unchecked
+            };
+            _chkStartup.CheckState = _initialStartupCheckState;
+            UpdateStartupControlDescription();
+            _chkStartup.CheckStateChanged += (_, __) => UpdateStartupControlDescription();
             _chkConfirmDisable.Checked = confirmBeforeDisable;
             _chkRestoreLayoutOnStartup.Checked = restoreLayoutOnStartup;
             SetSelectedLayoutProfile(_selectedLayoutProfile);
@@ -203,8 +209,6 @@ namespace WorkMonitorSwitcher
             };
             fallbackPrimaryCol.ThreeState = false;
 
-            foreach (var row in _rows)
-                row.IsPreferredPrimary = false;
             NormalisePrimaryFallbackRows();
 
             _grid.Columns.Add(shortKeyCol);
@@ -309,7 +313,17 @@ namespace WorkMonitorSwitcher
             _openRegistry.Click += (_, __) => OpenRegistryForSelectedRow();
             _layoutProfileButton.Click += (_, __) => ShowLayoutProfileMenu();
             _deleteProfile.Click += (_, __) => DeleteSelectedProfile();
-            _updateApp.Click += async (_, __) => await UpdateAppAsync();
+            _updateApp.Click += async (_, __) =>
+            {
+                if (_updateInProgress)
+                {
+                    _updateStatus.Text = "Cancelling update check…";
+                    _updateCancellation?.Cancel();
+                    return;
+                }
+
+                await CheckForUpdatesAsync();
+            };
             _showDiagnostics.Click += (_, __) => ShowDiagnosticsDialog();
             _clearDiagnostics.Click += (_, __) => ClearDiagnostics();
             _toolTip.SetToolTip(_chkDark, "Use the dark color theme.");
@@ -322,7 +336,7 @@ namespace WorkMonitorSwitcher
             _toolTip.SetToolTip(_deleteProfile, "Delete the selected saved layout profile. Default cannot be deleted.");
             _toolTip.SetToolTip(_remove, "Remove selected saved monitor entries.");
             _toolTip.SetToolTip(_openRegistry, "Open Registry Editor at the selected monitor key.");
-            _toolTip.SetToolTip(_updateApp, "Download the latest GitHub release asset if one is published.");
+            _toolTip.SetToolTip(_updateApp, "Check for, verify and extract the latest stable GitHub release.");
             _toolTip.SetToolTip(_showDiagnostics, "Show recent monitor action and layout profile events.");
             _toolTip.SetToolTip(_clearDiagnostics, "Permanently clear the saved diagnostics log and its temporary exported copy.");
 
@@ -359,7 +373,7 @@ namespace WorkMonitorSwitcher
             var generalLayout = new TableLayoutPanel
             {
                 Dock = DockStyle.Top,
-                Height = 250,
+                Height = 258,
                 ColumnCount = 2,
                 RowCount = 2,
                 Padding = new Padding(4)
@@ -367,7 +381,7 @@ namespace WorkMonitorSwitcher
             generalLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
             generalLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
             generalLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 158));
-            generalLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 84));
+            generalLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 92));
 
             var appearanceGroup = new GroupBox
             {
@@ -377,6 +391,9 @@ namespace WorkMonitorSwitcher
                 Margin = new Padding(0, 0, 7, 10)
             };
             var appearanceOptions = CreateVerticalOptionsPanel(_chkDark, _chkTopMost, _chkTray);
+            _chkDark.TabIndex = 0;
+            _chkTopMost.TabIndex = 1;
+            _chkTray.TabIndex = 2;
             appearanceGroup.Controls.Add(appearanceOptions);
 
             var behaviourGroup = new GroupBox
@@ -390,6 +407,9 @@ namespace WorkMonitorSwitcher
                 _chkStartup,
                 _chkConfirmDisable,
                 _chkRestoreLayoutOnStartup);
+            _chkStartup.TabIndex = 0;
+            _chkConfirmDisable.TabIndex = 1;
+            _chkRestoreLayoutOnStartup.TabIndex = 2;
             behaviourGroup.Controls.Add(behaviourOptions);
 
             var maintenanceGroup = new GroupBox
@@ -399,16 +419,39 @@ namespace WorkMonitorSwitcher
                 Padding = new Padding(14, 20, 14, 10),
                 Margin = new Padding(0)
             };
+            var maintenanceContent = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 2,
+                Margin = Padding.Empty,
+                Padding = Padding.Empty
+            };
+            maintenanceContent.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            maintenanceContent.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            maintenanceContent.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             var maintenanceActions = new FlowLayoutPanel
             {
                 Dock = DockStyle.Fill,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 FlowDirection = FlowDirection.LeftToRight,
-                WrapContents = false
+                WrapContents = true,
+                Margin = Padding.Empty,
+                Padding = Padding.Empty
             };
+            _updateApp.TabIndex = 0;
+            _showDiagnostics.TabIndex = 1;
+            _clearDiagnostics.TabIndex = 2;
             maintenanceActions.Controls.Add(_updateApp);
             maintenanceActions.Controls.Add(_showDiagnostics);
             maintenanceActions.Controls.Add(_clearDiagnostics);
-            maintenanceGroup.Controls.Add(maintenanceActions);
+            _updateStatus.Dock = DockStyle.Fill;
+            _updateStatus.AutoEllipsis = true;
+            _updateStatus.Margin = new Padding(0, 6, 0, 0);
+            maintenanceContent.Controls.Add(maintenanceActions, 0, 0);
+            maintenanceContent.Controls.Add(_updateStatus, 0, 1);
+            maintenanceGroup.Controls.Add(maintenanceContent);
 
             generalLayout.Controls.Add(appearanceGroup, 0, 0);
             generalLayout.Controls.Add(behaviourGroup, 1, 0);
@@ -452,6 +495,9 @@ namespace WorkMonitorSwitcher
             };
             monitorActions.Controls.Add(_openRegistry);
             monitorActions.Controls.Add(_remove);
+            _grid.TabIndex = 0;
+            _openRegistry.TabIndex = 0;
+            _remove.TabIndex = 1;
             monitorsPage.Controls.Add(monitorLayout);
             bottom.Controls.Add(monitorActions, 0, 0);
 
@@ -484,6 +530,8 @@ namespace WorkMonitorSwitcher
             };
             _layoutProfileButton.Margin = new Padding(0, 0, 8, 0);
             _deleteProfile.Margin = new Padding(0, 0, 8, 0);
+            _layoutProfileButton.TabIndex = 0;
+            _deleteProfile.TabIndex = 1;
             profileActions.Controls.Add(profileLabel);
             profileActions.Controls.Add(_layoutProfileButton);
             profileActions.Controls.Add(_deleteProfile);
@@ -514,7 +562,9 @@ namespace WorkMonitorSwitcher
                     int gridHeight = _grid.ColumnHeadersHeight + (rowCount * _grid.RowTemplate.Height) + 4;
                     int textWidth = Math.Max(240, detailsGroup.ClientSize.Width - detailsGroup.Padding.Horizontal - 8);
                     int textHeight = CalculateDetailsTextHeight(_details.Text, _details.Font, textWidth);
-                    int detailsHeight = textHeight + detailsGroup.Padding.Vertical + detailsGroup.Margin.Vertical + 8;
+                    int detailsHeight = Math.Max(
+                        128,
+                        textHeight + detailsGroup.Padding.Vertical + detailsGroup.Margin.Vertical + 8);
 
                     monitorGridRow.Height = gridHeight;
                     monitorDetailsRow.Height = detailsHeight;
@@ -527,7 +577,7 @@ namespace WorkMonitorSwitcher
                     {
                         int desiredClientHeight = 46 + bottom.Height + monitorsPage.Padding.Vertical + monitorLayout.Height;
                         int maxClientHeight = Math.Max(300, Screen.FromControl(this).WorkingArea.Height - 80);
-                        ClientSize = new Size(ClientSize.Width, Math.Min(desiredClientHeight, maxClientHeight));
+                        SetResponsiveClientHeight(Math.Min(desiredClientHeight, maxClientHeight));
                     }
                 }
                 finally
@@ -545,15 +595,17 @@ namespace WorkMonitorSwitcher
             pageHost.Controls.Add(monitorsPage);
             pageHost.Controls.Add(generalPage);
 
-            var generalButton = new ThemedButton { Text = "General", Size = new Size(92, 32), Tone = ThemedButtonTone.Primary };
-            var monitorsButton = new ThemedButton { Text = "Monitors", Size = new Size(92, 32) };
-            var profilesButton = new ThemedButton { Text = "Profiles", Size = new Size(92, 32) };
+            var generalButton = new ThemedButton { Text = "General", Size = new Size(92, 32), Tone = ThemedButtonTone.Primary, TabIndex = 0 };
+            var monitorsButton = new ThemedButton { Text = "Monitors", Size = new Size(92, 32), TabIndex = 1 };
+            var profilesButton = new ThemedButton { Text = "Profiles", Size = new Size(92, 32), TabIndex = 2 };
             var navigation = new FlowLayoutPanel
             {
                 Dock = DockStyle.Fill,
                 FlowDirection = FlowDirection.LeftToRight,
                 WrapContents = false,
-                Padding = new Padding(14, 7, 14, 7)
+                Padding = new Padding(14, 7, 14, 7),
+                AccessibleName = "Settings sections",
+                AccessibleRole = AccessibleRole.PageTabList
             };
             foreach (var button in new[] { generalButton, monitorsButton, profilesButton })
             {
@@ -572,9 +624,18 @@ namespace WorkMonitorSwitcher
                 var palette = _chkDark.Checked ? ThemePalette.Dark() : ThemePalette.Light();
                 foreach (var button in new[] { generalButton, monitorsButton, profilesButton })
                 {
+                    bool isSelected = ReferenceEquals(button, selectedButton);
+                    button.AccessibilitySelected = isSelected;
                     button.Tone = ReferenceEquals(button, selectedButton)
                         ? ThemedButtonTone.Primary
                         : ThemedButtonTone.Neutral;
+                    button.AccessibleRole = AccessibleRole.PageTab;
+                    button.AccessibleName = isSelected
+                        ? $"{button.Text} settings tab, selected"
+                        : $"{button.Text} settings tab";
+                    button.AccessibleDescription = isSelected
+                        ? "Selected settings section."
+                        : "Select this settings section.";
                     Themer.ApplyButtonStyle(button, palette);
                 }
 
@@ -590,13 +651,38 @@ namespace WorkMonitorSwitcher
                             : Math.Max(profileGroup.Height, profileGroup.PreferredSize.Height);
                     int desiredClientHeight = 46 + bottom.Height + page.Padding.Vertical + contentHeight;
                     int maxClientHeight = Math.Max(300, Screen.FromControl(this).WorkingArea.Height - 80);
-                    ClientSize = new Size(ClientSize.Width, Math.Min(desiredClientHeight, maxClientHeight));
+                    SetResponsiveClientHeight(Math.Min(desiredClientHeight, maxClientHeight));
                 }
             }
 
             generalButton.Click += (_, __) => ShowPage(generalPage, generalButton);
             monitorsButton.Click += (_, __) => ShowPage(monitorsPage, monitorsButton);
             profilesButton.Click += (_, __) => ShowPage(profilesPage, profilesButton);
+            var navigationButtons = new[] { generalButton, monitorsButton, profilesButton };
+            for (int index = 0; index < navigationButtons.Length; index++)
+            {
+                int buttonIndex = index;
+                navigationButtons[index].KeyDown += (_, e) =>
+                {
+                    int targetIndex = e.KeyCode switch
+                    {
+                        Keys.Left => (buttonIndex + navigationButtons.Length - 1) % navigationButtons.Length,
+                        Keys.Right => (buttonIndex + 1) % navigationButtons.Length,
+                        Keys.Home => 0,
+                        Keys.End => navigationButtons.Length - 1,
+                        _ => -1
+                    };
+                    if (targetIndex < 0)
+                        return;
+
+                    var targetButton = navigationButtons[targetIndex];
+                    var targetPage = targetIndex == 0 ? generalPage : targetIndex == 1 ? monitorsPage : profilesPage;
+                    ShowPage(targetPage, targetButton);
+                    targetButton.Focus();
+                    e.Handled = true;
+                    e.SuppressKeyPress = true;
+                };
+            }
 
             var navigationSeparator = new Panel
             {
@@ -626,6 +712,8 @@ namespace WorkMonitorSwitcher
 
             AcceptButton = _ok;
             CancelButton = _cancel;
+            _cancel.TabIndex = 0;
+            _ok.TabIndex = 1;
 
             // Initial theme
             ApplyDialogTheme(darkMode);
@@ -649,7 +737,9 @@ namespace WorkMonitorSwitcher
                 FallbackPrimaryKey = _rows.FirstOrDefault(r => r.IsFallbackPrimary)?.StableKey;
                 AlwaysOnTopResult = _chkTopMost.Checked;
                 MinimizeToTrayResult = _chkTray.Checked;
-                StartWithWindowsResult = _chkStartup.Checked;
+                StartWithWindowsResult = ResolveStartupIntent(
+                    _initialStartupCheckState,
+                    _chkStartup.CheckState);
                 ConfirmBeforeDisableResult = _chkConfirmDisable.Checked;
                 RestoreLayoutOnStartupResult = _chkRestoreLayoutOnStartup.Checked;
                 SelectedLayoutProfileResult = _selectedLayoutProfile;
@@ -658,6 +748,41 @@ namespace WorkMonitorSwitcher
             };
 
             UpdateDetailsPanel();
+        }
+
+        internal static bool? ResolveStartupIntent(
+            CheckState initialState,
+            CheckState currentState)
+        {
+            if (currentState == initialState)
+                return null;
+
+            return currentState switch
+            {
+                CheckState.Checked => true,
+                CheckState.Unchecked => false,
+                _ => null
+            };
+        }
+
+        private void UpdateStartupControlDescription()
+        {
+            if (_chkStartup.CheckState == CheckState.Indeterminate)
+            {
+                _chkStartup.Text = "Start with Windows (different entry)";
+                _chkStartup.AccessibleDescription =
+                    "A different or unrecognised Monitor Switcher command is registered to start with Windows. " +
+                    "Leave this unchanged to preserve it, tick to replace it, or untick to remove it.";
+            }
+            else
+            {
+                _chkStartup.Text = "Start with Windows";
+                _chkStartup.AccessibleDescription = _chkStartup.Checked
+                    ? "This Monitor Switcher executable will start with Windows."
+                    : "Monitor Switcher will not change the Windows startup entry unless this option is changed.";
+            }
+
+            _toolTip.SetToolTip(_chkStartup, _chkStartup.AccessibleDescription);
         }
 
         private static FlowLayoutPanel CreateVerticalOptionsPanel(params CheckBox[] options)
@@ -742,6 +867,36 @@ namespace WorkMonitorSwitcher
 
             MinimumSize = SizeFromClientSize(minimumClientSize);
             ClientSize = desiredClientSize;
+        }
+
+        private void SetResponsiveClientHeight(int desiredClientHeight)
+        {
+            if (WindowState != FormWindowState.Normal)
+                return;
+
+            var workingArea = Screen.FromControl(this).WorkingArea;
+            int nonClientHeight = Height - ClientSize.Height;
+            int maximumClientHeight = Math.Max(240, workingArea.Height - nonClientHeight);
+            int minimumClientHeight = Math.Min(
+                maximumClientHeight,
+                Math.Max(240, MinimumSize.Height - nonClientHeight));
+            int clampedHeight = Math.Clamp(desiredClientHeight, minimumClientHeight, maximumClientHeight);
+            ClientSize = new Size(Math.Min(ClientSize.Width, workingArea.Width), clampedHeight);
+
+            if (Visible && IsHandleCreated)
+                ClampToWorkingArea(workingArea);
+        }
+
+        private void ClampToWorkingArea(Rectangle workingArea)
+        {
+            if (WindowState != FormWindowState.Normal)
+                return;
+
+            int width = Math.Min(Width, workingArea.Width);
+            int height = Math.Min(Height, workingArea.Height);
+            int left = Math.Clamp(Left, workingArea.Left, workingArea.Right - width);
+            int top = Math.Clamp(Top, workingArea.Top, workingArea.Bottom - height);
+            Bounds = new Rectangle(left, top, width, height);
         }
 
         private void KeepSingleCheckedRow(
@@ -1060,438 +1215,137 @@ namespace WorkMonitorSwitcher
             return string.Empty;
         }
 
-        private async Task UpdateAppAsync()
+        private async Task CheckForUpdatesAsync()
         {
-            var originalText = _updateApp.Text;
-            Enabled = false;
-            UseWaitCursor = true;
-            _updateApp.Text = "Checking...";
+            _updateInProgress = true;
+            _updateApp.Text = "Cancel Update Check";
+            _updateApp.AccessibleName = "Cancel update check";
+            _updateStatus.Text = "Checking GitHub releases…";
+            _updateStatus.Visible = true;
+
+            using var timeoutCancellation = new CancellationTokenSource(UpdateOperationTimeout);
+            using var userCancellation = new CancellationTokenSource();
+            using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+                timeoutCancellation.Token,
+                userCancellation.Token);
+            _updateCancellation = userCancellation;
+
+            var progress = new Progress<AppUpdateProgress>(value =>
+            {
+                if (!IsDisposed && !Disposing)
+                    _updateStatus.Text = value.DisplayText;
+            });
 
             try
             {
-                using var request = new HttpRequestMessage(HttpMethod.Get, LatestReleaseApiUri);
-                request.Headers.UserAgent.Add(new ProductInfoHeaderValue("MonitorSwitcher", "1.0"));
-                request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
-
-                byte[] releaseJson;
-                try
-                {
-                    releaseJson = await DownloadBytesAsync(request, MaxReleaseApiBytes, IsExpectedReleaseApiUri);
-                }
-                catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
-                {
-                    MessageBox.Show(
-                        this,
-                        "No GitHub release is published for this repository yet.",
-                        "Update App",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Information);
+                AppUpdateResult result = await _updateService.CheckAndDownloadAsync(
+                    GetCurrentInformationalVersion(),
+                    progress,
+                    linkedCancellation.Token);
+                if (IsDisposed || Disposing)
                     return;
+
+                switch (result.Status)
+                {
+                    case AppUpdateStatus.NoPublishedRelease:
+                        _updateStatus.Text = "No stable release is currently published.";
+                        ThemedMessageBox.Info(
+                            this,
+                            "No stable GitHub release is published for this repository yet.",
+                            "Check for Updates",
+                            _chkDark.Checked);
+                        break;
+
+                    case AppUpdateStatus.Current:
+                        _updateStatus.Text = "MonitorSwitcher is up to date.";
+                        ThemedMessageBox.Info(
+                            this,
+                            $"You already have MonitorSwitcher {result.CurrentVersion}.\n\n" +
+                            $"The latest stable release is {result.ReleaseVersion}.",
+                            "Check for Updates",
+                            _chkDark.Checked);
+                        break;
+
+                    case AppUpdateStatus.Ready:
+                    case AppUpdateStatus.Reused:
+                        _updateStatus.Text = result.Status == AppUpdateStatus.Reused
+                            ? $"Verified release {result.ReleaseVersion} is already downloaded."
+                            : $"Release {result.ReleaseVersion} was downloaded and verified.";
+                        ShowDownloadedUpdate(result);
+                        break;
                 }
 
-                var release = JsonSerializer.Deserialize<GitHubRelease>(releaseJson);
-                if (release == null)
-                    throw new InvalidOperationException("Unable to read the latest release details.");
-
-                if (release.Draft || release.Prerelease)
-                    throw new InvalidDataException("GitHub returned a draft or pre-release instead of the latest stable release.");
-
-                if (!SemanticVersion.TryParseReleaseTag(release.TagName, out SemanticVersion releaseVersion))
-                    throw new InvalidDataException($"The release tag '{release.TagName}' is not a stable semantic version such as v1.2.3.");
-
-                string currentVersionText = GetCurrentInformationalVersion();
-                if (!SemanticVersion.TryParse(currentVersionText, out SemanticVersion currentVersion))
-                    throw new InvalidDataException($"The installed app version '{currentVersionText}' is not a valid semantic version.");
-
-                if (releaseVersion.CompareTo(currentVersion) <= 0)
+                if (!string.IsNullOrWhiteSpace(result.CleanupWarning))
                 {
-                    MessageBox.Show(
+                    ThemedMessageBox.Warn(
                         this,
-                        $"You already have MonitorSwitcher {currentVersion}.\n\n" +
-                        $"The latest published release is {releaseVersion}, so no update is required.",
-                        "Update App",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Information);
+                        "The verified release is ready, but its temporary download directory could not be removed.\n\n" +
+                        result.CleanupWarning,
+                        "Check for Updates",
+                        _chkDark.Checked);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                if (IsDisposed || Disposing)
                     return;
-                }
 
-                string expectedAssetName = $"MonitorSwitcher-{release.TagName}-win-x64.zip";
-                string expectedChecksumName = expectedAssetName + ".sha256";
-                GitHubReleaseAsset asset = FindUniqueReleaseAsset(release.Assets, expectedAssetName, required: true)!;
-                GitHubReleaseAsset checksumAsset = FindUniqueReleaseAsset(release.Assets, expectedChecksumName, required: true)!;
-                ValidateReleaseAsset(asset, release.TagName, expectedAssetName, MaxAppArchiveBytes);
-                ValidateReleaseAsset(checksumAsset, release.TagName, expectedChecksumName, MaxChecksumBytes);
-
-                _updateApp.Text = "Downloading...";
-
-                string appDir = Path.GetFullPath(AppContext.BaseDirectory);
-                string updatesDir = Path.Combine(appDir, "updates");
-                Directory.CreateDirectory(updatesDir);
-                string? stagingRoot = Path.Combine(updatesDir, $".app-update-staging-{Guid.NewGuid():N}");
-
-                try
+                _updateStatus.Text = timeoutCancellation.IsCancellationRequested
+                    ? "The update check timed out."
+                    : "Update check cancelled.";
+                if (timeoutCancellation.IsCancellationRequested)
                 {
-                    Directory.CreateDirectory(stagingRoot);
-                    string assetPath = Path.Combine(stagingRoot, expectedAssetName);
-                    await DownloadFileAsync(
-                        new Uri(asset.DownloadUrl, UriKind.Absolute),
-                        assetPath,
-                        MaxAppArchiveBytes,
-                        IsSafeGitHubDownloadRedirectUri);
-                    VerifyExpectedDownloadSize(assetPath, asset.Size, expectedAssetName);
-
-                    string checksumPath = Path.Combine(stagingRoot, expectedChecksumName);
-                    await DownloadFileAsync(
-                        new Uri(checksumAsset.DownloadUrl, UriKind.Absolute),
-                        checksumPath,
-                        MaxChecksumBytes,
-                        IsSafeGitHubDownloadRedirectUri);
-                    VerifyExpectedDownloadSize(checksumPath, checksumAsset.Size, expectedChecksumName);
-                    VerifyPublishedSha256(assetPath, checksumPath, expectedAssetName);
-
-                    VerifyGitHubDigestWhenPresent(assetPath, asset.Digest);
-
-                    string packageDir = Path.Combine(stagingRoot, "package");
-                    ExtractZipSafely(
-                        assetPath,
-                        packageDir,
-                        MaxAppArchiveEntries,
-                        MaxAppExpandedBytes,
-                        MaxAppArchiveBytes);
-                    ValidateMonitorSwitcherPackage(packageDir, releaseVersion);
-
-                    string finalRoot = GetUniqueDirectoryPath(
-                        Path.Combine(updatesDir, $"MonitorSwitcher-{release.TagName}-win-x64"));
-                    Directory.Move(stagingRoot, finalRoot);
-                    stagingRoot = null;
-                    string finalPath = Path.Combine(finalRoot, "package");
-
-                    var openChoice = MessageBox.Show(
+                    ThemedMessageBox.Warn(
                         this,
-                        $"MonitorSwitcher {releaseVersion} was downloaded and verified.\n\n" +
-                        $"The current installation was not changed, so it remains available for rollback.\n\n" +
-                        $"Extracted update:\n{finalPath}\n\nOpen the folder now?",
-                        "Update App",
-                        MessageBoxButtons.YesNo,
-                        MessageBoxIcon.Information);
-
-                    if (openChoice == DialogResult.Yes)
-                        OpenExplorerAt(finalPath);
-                }
-                finally
-                {
-                    if (stagingRoot != null)
-                        TryDeleteDirectory(stagingRoot);
+                        $"The update check did not finish within {UpdateOperationTimeout.TotalMinutes:0} minutes and was cancelled.",
+                        "Check for Updates",
+                        _chkDark.Checked);
                 }
             }
             catch (Exception ex)
             {
-                MessageBox.Show(
+                if (IsDisposed || Disposing)
+                    return;
+
+                _updateStatus.Text = "The update check failed.";
+                ThemedMessageBox.Warn(
                     this,
-                    $"Unable to update from GitHub releases.\n{ex.Message}",
-                    "Update App",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Warning);
+                    $"Unable to check or download GitHub releases.\n{ex.Message}",
+                    "Check for Updates",
+                    _chkDark.Checked);
             }
             finally
             {
-                _updateApp.Text = originalText;
-                UseWaitCursor = false;
-                Enabled = true;
-            }
-        }
-
-        private static async Task<byte[]> DownloadBytesAsync(
-            HttpRequestMessage request,
-            long maximumBytes,
-            Func<Uri, bool> isAllowedFinalUri)
-        {
-            using var response = await SendWithValidatedRedirectsAsync(request, isAllowedFinalUri);
-            ValidateDownloadResponse(response, maximumBytes, isAllowedFinalUri);
-
-            await using var source = await response.Content.ReadAsStreamAsync();
-            using var destination = new MemoryStream();
-            await CopyStreamWithLimitAsync(source, destination, maximumBytes);
-            return destination.ToArray();
-        }
-
-        private static async Task DownloadFileAsync(
-            Uri sourceUri,
-            string destinationPath,
-            long maximumBytes,
-            Func<Uri, bool> isAllowedFinalUri)
-        {
-            using var request = new HttpRequestMessage(HttpMethod.Get, sourceUri);
-            request.Headers.UserAgent.Add(new ProductInfoHeaderValue("MonitorSwitcher", "1.0"));
-            using var response = await SendWithValidatedRedirectsAsync(request, isAllowedFinalUri);
-            ValidateDownloadResponse(response, maximumBytes, isAllowedFinalUri);
-
-            string? destinationDirectory = Path.GetDirectoryName(destinationPath);
-            if (!string.IsNullOrWhiteSpace(destinationDirectory))
-                Directory.CreateDirectory(destinationDirectory);
-
-            await using var source = await response.Content.ReadAsStreamAsync();
-            await using var destination = new FileStream(
-                destinationPath,
-                FileMode.CreateNew,
-                FileAccess.Write,
-                FileShare.None,
-                81920,
-                useAsync: true);
-            await CopyStreamWithLimitAsync(source, destination, maximumBytes);
-        }
-
-        private static async Task<HttpResponseMessage> SendWithValidatedRedirectsAsync(
-            HttpRequestMessage initialRequest,
-            Func<Uri, bool> isAllowedUri)
-        {
-            const int maximumRedirects = 5;
-            HttpRequestMessage currentRequest = initialRequest;
-            bool ownsCurrentRequest = false;
-
-            try
-            {
-                for (int redirectCount = 0; ; redirectCount++)
+                if (ReferenceEquals(_updateCancellation, userCancellation))
+                    _updateCancellation = null;
+                _updateInProgress = false;
+                if (!IsDisposed && !Disposing)
                 {
-                    Uri? currentUri = currentRequest.RequestUri;
-                    if (currentUri == null || !isAllowedUri(currentUri))
-                        throw new InvalidDataException("The download address is not permitted.");
-
-                    HttpResponseMessage response = await Http.SendAsync(
-                        currentRequest,
-                        HttpCompletionOption.ResponseHeadersRead);
-                    if (!IsRedirectStatusCode(response.StatusCode))
-                        return response;
-
-                    try
-                    {
-                        if (redirectCount >= maximumRedirects)
-                            throw new InvalidDataException("The download exceeded the permitted redirect count.");
-
-                        Uri? location = response.Headers.Location;
-                        if (location == null)
-                            throw new InvalidDataException("The download returned a redirect without a destination.");
-
-                        Uri nextUri = location.IsAbsoluteUri ? location : new Uri(currentUri, location);
-                        if (!isAllowedUri(nextUri))
-                            throw new InvalidDataException("The download was redirected to an unexpected address.");
-
-                        var nextRequest = new HttpRequestMessage(HttpMethod.Get, nextUri);
-                        foreach (var header in initialRequest.Headers)
-                            nextRequest.Headers.TryAddWithoutValidation(header.Key, header.Value);
-
-                        if (ownsCurrentRequest)
-                            currentRequest.Dispose();
-                        currentRequest = nextRequest;
-                        ownsCurrentRequest = true;
-                    }
-                    finally
-                    {
-                        response.Dispose();
-                    }
+                    _updateApp.Text = "Check for Updates";
+                    _updateApp.AccessibleName = "Check for updates";
                 }
             }
-            finally
-            {
-                if (ownsCurrentRequest)
-                    currentRequest.Dispose();
-            }
         }
 
-        private static bool IsRedirectStatusCode(System.Net.HttpStatusCode statusCode)
-            => statusCode is System.Net.HttpStatusCode.MovedPermanently or
-                System.Net.HttpStatusCode.Redirect or
-                System.Net.HttpStatusCode.RedirectMethod or
-                System.Net.HttpStatusCode.TemporaryRedirect or
-                System.Net.HttpStatusCode.PermanentRedirect;
-
-        private static void ValidateDownloadResponse(
-            HttpResponseMessage response,
-            long maximumBytes,
-            Func<Uri, bool> isAllowedFinalUri)
+        private void ShowDownloadedUpdate(AppUpdateResult result)
         {
-            Uri? finalUri = response.RequestMessage?.RequestUri;
-            if (finalUri == null || !isAllowedFinalUri(finalUri))
-                throw new InvalidDataException("The download was redirected to an unexpected address.");
+            if (string.IsNullOrWhiteSpace(result.PackageDirectory))
+                throw new InvalidOperationException("The verified update folder was not returned.");
 
-            response.EnsureSuccessStatusCode();
-
-            long? contentLength = response.Content.Headers.ContentLength;
-            if (contentLength is < 1)
-                throw new InvalidDataException("The server returned an empty download.");
-            if (contentLength > maximumBytes)
-                throw new InvalidDataException($"The server reported a download larger than the {FormatByteLimit(maximumBytes)} limit.");
-        }
-
-        private static async Task CopyStreamWithLimitAsync(Stream source, Stream destination, long maximumBytes)
-        {
-            var buffer = new byte[81920];
-            long totalBytes = 0;
-            while (true)
-            {
-                int bytesRead = await source.ReadAsync(buffer.AsMemory(0, buffer.Length));
-                if (bytesRead == 0)
-                    break;
-
-                totalBytes = checked(totalBytes + bytesRead);
-                if (totalBytes > maximumBytes)
-                    throw new InvalidDataException($"The download exceeded the {FormatByteLimit(maximumBytes)} limit.");
-
-                await destination.WriteAsync(buffer.AsMemory(0, bytesRead));
-            }
-
-            if (totalBytes == 0)
-                throw new InvalidDataException("The server returned an empty download.");
-        }
-
-        private static string FormatByteLimit(long bytes)
-            => $"{bytes / (1024 * 1024)} MB";
-
-        private static bool IsExpectedReleaseApiUri(Uri uri)
-            => IsExactHttpsUri(uri, LatestReleaseApiUri);
-
-        private static bool IsSafeGitHubDownloadRedirectUri(Uri uri)
-        {
-            if (!IsSafeHttpsUri(uri) || !string.IsNullOrEmpty(uri.Fragment))
-                return false;
-
-            return uri.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase) ||
-                   uri.Host.Equals("objects.githubusercontent.com", StringComparison.OrdinalIgnoreCase) ||
-                   uri.Host.Equals("release-assets.githubusercontent.com", StringComparison.OrdinalIgnoreCase);
-        }
-
-        private static bool IsExactHttpsUri(Uri actual, Uri expected)
-            => IsSafeHttpsUri(actual) &&
-               actual.Host.Equals(expected.Host, StringComparison.OrdinalIgnoreCase) &&
-               actual.AbsolutePath.Equals(expected.AbsolutePath, StringComparison.Ordinal) &&
-               string.IsNullOrEmpty(actual.Query) &&
-               string.IsNullOrEmpty(actual.Fragment);
-
-        private static bool IsSafeHttpsUri(Uri uri)
-            => uri.IsAbsoluteUri &&
-               uri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) &&
-               string.IsNullOrEmpty(uri.UserInfo) &&
-               (uri.IsDefaultPort || uri.Port == 443);
-
-        private static GitHubReleaseAsset? FindUniqueReleaseAsset(
-            IEnumerable<GitHubReleaseAsset> assets,
-            string expectedName,
-            bool required)
-        {
-            GitHubReleaseAsset[] matches = assets
-                .Where(asset => asset.Name.Equals(expectedName, StringComparison.Ordinal))
-                .ToArray();
-
-            if (matches.Length > 1)
-                throw new InvalidDataException($"Release {expectedName} is listed more than once.");
-            if (matches.Length == 0 && required)
-                throw new InvalidDataException($"The release is missing the expected asset {expectedName}.");
-
-            return matches.SingleOrDefault();
-        }
-
-        private static void ValidateReleaseAsset(
-            GitHubReleaseAsset asset,
-            string releaseTag,
-            string expectedName,
-            long maximumBytes)
-        {
-            if (!IsSafeFileName(asset.Name) || !asset.Name.Equals(expectedName, StringComparison.Ordinal))
-                throw new InvalidDataException("The release contains an unsafe or unexpected asset name.");
-            if (asset.Size < 1 || asset.Size > maximumBytes)
-                throw new InvalidDataException($"The reported size of {expectedName} is outside the allowed range.");
-            if (!Uri.TryCreate(asset.DownloadUrl, UriKind.Absolute, out Uri? downloadUri))
-                throw new InvalidDataException($"The download address for {expectedName} is invalid.");
-
-            if (!IsExpectedGitHubReleaseAssetUri(downloadUri, releaseTag, expectedName))
-                throw new InvalidDataException($"The download address for {expectedName} is not the expected GitHub release path.");
-        }
-
-        internal static bool IsExpectedGitHubReleaseAssetUri(Uri uri, string releaseTag, string assetName)
-        {
-            if (!SemanticVersion.TryParseReleaseTag(releaseTag, out _) || !IsSafeFileName(assetName))
-                return false;
-
-            var expectedUri = new Uri($"https://github.com/Ci303/monitor-switcher-native/releases/download/{releaseTag}/{assetName}");
-            return IsExactHttpsUri(uri, expectedUri);
-        }
-
-        private static bool IsSafeFileName(string value)
-            => !string.IsNullOrWhiteSpace(value) &&
-               value.Equals(Path.GetFileName(value), StringComparison.Ordinal) &&
-               !value.Contains('/') &&
-               !value.Contains('\\') &&
-               IsSafePathSegment(value);
-
-        private static void VerifyExpectedDownloadSize(string path, long expectedBytes, string displayName)
-        {
-            long actualBytes = new FileInfo(path).Length;
-            if (actualBytes != expectedBytes)
-            {
-                throw new InvalidDataException(
-                    $"Downloaded size mismatch for {displayName}: GitHub reported {expectedBytes} bytes but received {actualBytes} bytes.");
-            }
-        }
-
-        private static void VerifyPublishedSha256(string assetPath, string checksumPath, string expectedAssetName)
-        {
-            string checksumText = File.ReadAllText(checksumPath, Encoding.UTF8);
-            if (!TryParsePublishedSha256(checksumText, expectedAssetName, out string expectedHash))
-            {
-                throw new InvalidDataException("The published SHA-256 sidecar has an unexpected format or filename.");
-            }
-
-            string actualHash = ComputeSha256(assetPath);
-            if (!actualHash.Equals(expectedHash, StringComparison.OrdinalIgnoreCase))
-                throw new InvalidDataException("The downloaded update does not match its published SHA-256 checksum.");
-        }
-
-        internal static bool TryParsePublishedSha256(
-            string? checksumText,
-            string expectedAssetName,
-            out string expectedHash)
-        {
-            expectedHash = string.Empty;
-            if (checksumText == null || !IsSafeFileName(expectedAssetName))
-                return false;
-
-            string[] fields = checksumText.Trim().TrimStart('\uFEFF')
-                .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
-            if (fields.Length != 2 ||
-                !IsSha256(fields[0]) ||
-                !fields[1].TrimStart('*').Equals(expectedAssetName, StringComparison.Ordinal))
-            {
-                return false;
-            }
-
-            expectedHash = fields[0];
-            return true;
-        }
-
-        private static void VerifyGitHubDigestWhenPresent(string assetPath, string? publishedDigest)
-        {
-            if (string.IsNullOrWhiteSpace(publishedDigest))
-                return;
-
-            const string prefix = "sha256:";
-            if (!publishedDigest.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ||
-                !IsSha256(publishedDigest[prefix.Length..]))
-            {
-                throw new InvalidDataException("GitHub returned an unsupported or malformed release-asset digest.");
-            }
-
-            string actualHash = ComputeSha256(assetPath);
-            if (!actualHash.Equals(publishedDigest[prefix.Length..], StringComparison.OrdinalIgnoreCase))
-                throw new InvalidDataException("The downloaded update does not match GitHub's release-asset digest.");
-        }
-
-        private static bool IsSha256(string value)
-            => value.Length == 64 && value.All(Uri.IsHexDigit);
-
-        private static string ComputeSha256(string path)
-        {
-            using var stream = File.OpenRead(path);
-            return Convert.ToHexString(SHA256.HashData(stream));
+            string availability = result.Status == AppUpdateStatus.Reused
+                ? $"A previously downloaded copy of MonitorSwitcher {result.ReleaseVersion} was verified again."
+                : $"MonitorSwitcher {result.ReleaseVersion} was downloaded, verified and extracted.";
+            var openChoice = MessageBox.Show(
+                this,
+                $"{availability}\n\n" +
+                "The running installation and its Start or startup shortcuts were not changed. " +
+                "Run MonitorSwitcher.exe from the folder below to test the release.\n\n" +
+                $"Extracted release:\n{result.PackageDirectory}\n\nOpen the folder now?",
+                "Check for Updates",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Information);
+            if (openChoice == DialogResult.Yes)
+                OpenExplorerAt(result.PackageDirectory);
         }
 
         private static string GetCurrentInformationalVersion()
@@ -1501,226 +1355,6 @@ namespace WorkMonitorSwitcher
                 ?? Application.ProductVersion;
         }
 
-        private static void ExtractZipSafely(
-            string archivePath,
-            string destinationDirectory,
-            int maximumEntries,
-            long maximumExpandedBytes,
-            long maximumEntryBytes)
-        {
-            Directory.CreateDirectory(destinationDirectory);
-            string destinationRoot = Path.GetFullPath(destinationDirectory)
-                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
-
-            using var archive = ZipFile.OpenRead(archivePath);
-            if (archive.Entries.Count == 0 || archive.Entries.Count > maximumEntries)
-                throw new InvalidDataException($"The archive entry count is outside the allowed range (maximum {maximumEntries}).");
-
-            long totalExpandedBytes = 0;
-            var destinations = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-            foreach (ZipArchiveEntry entry in archive.Entries)
-            {
-                string rawPath = entry.FullName.Replace('\\', '/');
-                bool isDirectory = rawPath.EndsWith("/", StringComparison.Ordinal);
-                string trimmedPath = rawPath.TrimEnd('/');
-
-                if (!IsSafeArchivePath(rawPath))
-                    throw new InvalidDataException($"The archive contains an unsafe path: {entry.FullName}");
-                if (IsZipLinkOrReparsePoint(entry))
-                    throw new InvalidDataException($"The archive contains a link or reparse point: {entry.FullName}");
-
-                string[] segments = trimmedPath.Split('/');
-                string destinationPath = Path.GetFullPath(Path.Combine(destinationRoot, Path.Combine(segments)));
-                if (!destinationPath.StartsWith(destinationRoot, StringComparison.OrdinalIgnoreCase))
-                    throw new InvalidDataException($"The archive path escapes the extraction directory: {entry.FullName}");
-                if (!destinations.Add(destinationPath))
-                    throw new InvalidDataException($"The archive contains duplicate paths: {entry.FullName}");
-
-                if (isDirectory)
-                {
-                    Directory.CreateDirectory(destinationPath);
-                    continue;
-                }
-
-                if (entry.Length < 0 || entry.Length > maximumEntryBytes)
-                    throw new InvalidDataException($"Archive entry {entry.FullName} is larger than allowed.");
-
-                totalExpandedBytes = checked(totalExpandedBytes + entry.Length);
-                if (totalExpandedBytes > maximumExpandedBytes)
-                    throw new InvalidDataException("The archive expands beyond the allowed size.");
-
-                string? parentDirectory = Path.GetDirectoryName(destinationPath);
-                if (!string.IsNullOrWhiteSpace(parentDirectory))
-                    Directory.CreateDirectory(parentDirectory);
-
-                using Stream source = entry.Open();
-                using var destination = new FileStream(destinationPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
-                CopyArchiveEntryWithLimit(source, destination, entry.Length, maximumEntryBytes);
-            }
-        }
-
-        internal static bool IsSafeArchivePath(string? entryFullName)
-        {
-            if (string.IsNullOrWhiteSpace(entryFullName))
-                return false;
-
-            string normalised = entryFullName.Replace('\\', '/');
-            string trimmed = normalised.TrimEnd('/');
-            if (string.IsNullOrWhiteSpace(trimmed) || normalised.StartsWith("/", StringComparison.Ordinal))
-                return false;
-
-            return trimmed.Split('/').All(IsSafePathSegment);
-        }
-
-        private static void CopyArchiveEntryWithLimit(
-            Stream source,
-            Stream destination,
-            long declaredLength,
-            long maximumBytes)
-        {
-            var buffer = new byte[81920];
-            long written = 0;
-            while (true)
-            {
-                int count = source.Read(buffer, 0, buffer.Length);
-                if (count == 0)
-                    break;
-
-                written = checked(written + count);
-                if (written > maximumBytes || written > declaredLength)
-                    throw new InvalidDataException("An archive entry exceeded its declared or allowed size.");
-
-                destination.Write(buffer, 0, count);
-            }
-
-            if (written != declaredLength)
-                throw new InvalidDataException("An archive entry did not match its declared size.");
-        }
-
-        private static bool IsZipLinkOrReparsePoint(ZipArchiveEntry entry)
-        {
-            uint attributes = unchecked((uint)entry.ExternalAttributes);
-            uint unixFileType = (attributes >> 16) & 0xF000;
-            return unixFileType == 0xA000 ||
-                   (attributes & (uint)FileAttributes.ReparsePoint) != 0;
-        }
-
-        private static bool IsSafePathSegment(string segment)
-        {
-            if (string.IsNullOrWhiteSpace(segment) ||
-                segment is "." or ".." ||
-                segment.Length > 255 ||
-                segment.EndsWith(' ') ||
-                segment.EndsWith('.') ||
-                segment.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
-            {
-                return false;
-            }
-
-            string deviceName = segment.Split('.')[0];
-            if (deviceName.Equals("CON", StringComparison.OrdinalIgnoreCase) ||
-                deviceName.Equals("PRN", StringComparison.OrdinalIgnoreCase) ||
-                deviceName.Equals("AUX", StringComparison.OrdinalIgnoreCase) ||
-                deviceName.Equals("NUL", StringComparison.OrdinalIgnoreCase))
-            {
-                return false;
-            }
-
-            if (deviceName.Length == 4 &&
-                (deviceName.StartsWith("COM", StringComparison.OrdinalIgnoreCase) ||
-                 deviceName.StartsWith("LPT", StringComparison.OrdinalIgnoreCase)) &&
-                deviceName[3] is >= '1' and <= '9')
-            {
-                return false;
-            }
-
-            return true;
-        }
-
-        private static void ValidateMonitorSwitcherPackage(string packageDirectory, SemanticVersion expectedVersion)
-        {
-            string[] requiredFiles =
-            {
-                "MonitorSwitcher.exe",
-                "MonitorSwitcher.dll",
-                "MonitorSwitcher.deps.json",
-                "MonitorSwitcher.runtimeconfig.json",
-                "LICENSE",
-                "README.md",
-                "RELEASE_NOTES.md",
-                "THIRD-PARTY-NOTICES.md",
-                "DOTNET-RUNTIME-THIRD-PARTY-NOTICES.txt"
-            };
-
-            foreach (string requiredFile in requiredFiles)
-            {
-                string requiredPath = Path.Combine(packageDirectory, requiredFile);
-                if (!File.Exists(requiredPath) || new FileInfo(requiredPath).Length == 0)
-                    throw new InvalidDataException($"The update package is missing {requiredFile}.");
-            }
-
-            string packageRoot = Path.GetFullPath(packageDirectory)
-                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
-            string[] executableExtensions = { ".exe", ".com", ".cpl", ".msi", ".msp", ".msix", ".scr" };
-            foreach (string file in Directory.EnumerateFiles(packageRoot, "*", SearchOption.AllDirectories))
-            {
-                string relativePath = Path.GetRelativePath(packageRoot, file).Replace('\\', '/');
-                string extension = Path.GetExtension(file);
-                if (!executableExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase))
-                    continue;
-
-                bool allowed = relativePath.Equals("MonitorSwitcher.exe", StringComparison.OrdinalIgnoreCase) ||
-                               relativePath.Equals("createdump.exe", StringComparison.OrdinalIgnoreCase);
-                if (!allowed)
-                    throw new InvalidDataException($"The update package contains an unexpected executable: {relativePath}");
-            }
-
-            string executablePath = Path.Combine(packageDirectory, "MonitorSwitcher.exe");
-            ValidatePeMachine(executablePath, PeMachineAmd64);
-            FileVersionInfo versionInfo = FileVersionInfo.GetVersionInfo(executablePath);
-            if (!string.Equals(versionInfo.ProductName, "MonitorSwitcher", StringComparison.OrdinalIgnoreCase))
-                throw new InvalidDataException("The update executable does not identify itself as MonitorSwitcher.");
-            if (!SemanticVersion.TryParse(versionInfo.ProductVersion, out SemanticVersion packagedVersion) ||
-                packagedVersion.CompareTo(expectedVersion) != 0)
-            {
-                throw new InvalidDataException(
-                    $"The update executable version '{versionInfo.ProductVersion}' does not match release {expectedVersion}.");
-            }
-        }
-
-        private static void ValidatePeMachine(string executablePath, ushort expectedMachine)
-        {
-            using var stream = new FileStream(executablePath, FileMode.Open, FileAccess.Read, FileShare.Read);
-            using var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: true);
-            if (stream.Length < 64 || reader.ReadUInt16() != 0x5A4D)
-                throw new InvalidDataException($"{Path.GetFileName(executablePath)} is not a valid Windows PE file.");
-
-            stream.Position = 0x3C;
-            int peOffset = reader.ReadInt32();
-            if (peOffset < 64 || peOffset > stream.Length - 6)
-                throw new InvalidDataException($"{Path.GetFileName(executablePath)} has an invalid PE header.");
-
-            stream.Position = peOffset;
-            if (reader.ReadUInt32() != 0x00004550 || reader.ReadUInt16() != expectedMachine)
-                throw new InvalidDataException($"{Path.GetFileName(executablePath)} is not the expected x64 Windows executable.");
-        }
-
-        private static string GetUniqueDirectoryPath(string preferredPath)
-        {
-            if (!Directory.Exists(preferredPath) && !File.Exists(preferredPath))
-                return preferredPath;
-
-            for (int suffix = 2; suffix <= 999; suffix++)
-            {
-                string candidate = $"{preferredPath}-{suffix}";
-                if (!Directory.Exists(candidate) && !File.Exists(candidate))
-                    return candidate;
-            }
-
-            return $"{preferredPath}-{Guid.NewGuid():N}";
-        }
-
         private static void OpenExplorerAt(string path)
         {
             var startInfo = new ProcessStartInfo("explorer.exe") { UseShellExecute = true };
@@ -1728,223 +1362,20 @@ namespace WorkMonitorSwitcher
             Process.Start(startInfo);
         }
 
-        private static void TryDeleteDirectory(string path)
-        {
-            try
-            {
-                if (Directory.Exists(path))
-                    Directory.Delete(path, recursive: true);
-            }
-            catch
-            {
-                // Best-effort cleanup. Staging directories never replace the live app.
-            }
-        }
-
         internal static int? CompareSemanticVersions(string? left, string? right)
-        {
-            if (!SemanticVersion.TryParse(left, out SemanticVersion leftVersion) ||
-                !SemanticVersion.TryParse(right, out SemanticVersion rightVersion))
-            {
-                return null;
-            }
+            => AppUpdateService.CompareSemanticVersions(left, right);
 
-            return Math.Sign(leftVersion.CompareTo(rightVersion));
-        }
+        internal static bool IsExpectedGitHubReleaseAssetUri(Uri uri, string releaseTag, string assetName)
+            => AppUpdateService.IsExpectedGitHubReleaseAssetUri(uri, releaseTag, assetName);
 
-        internal readonly struct SemanticVersion : IComparable<SemanticVersion>
-        {
-            private readonly int _major;
-            private readonly int _minor;
-            private readonly int _patch;
-            private readonly string[] _preRelease;
-            private readonly bool _hasBuildMetadata;
+        internal static bool TryParsePublishedSha256(
+            string? checksumText,
+            string expectedAssetName,
+            out string expectedHash)
+            => AppUpdateService.TryParsePublishedSha256(checksumText, expectedAssetName, out expectedHash);
 
-            private SemanticVersion(
-                int major,
-                int minor,
-                int patch,
-                string[] preRelease,
-                bool hasBuildMetadata)
-            {
-                _major = major;
-                _minor = minor;
-                _patch = patch;
-                _preRelease = preRelease;
-                _hasBuildMetadata = hasBuildMetadata;
-            }
-
-            public static bool TryParseReleaseTag(string? value, out SemanticVersion version)
-            {
-                version = default;
-                if (string.IsNullOrWhiteSpace(value) || !value.StartsWith('v'))
-                    return false;
-
-                if (!TryParse(value, out SemanticVersion parsed) ||
-                    parsed._preRelease.Length != 0 ||
-                    parsed._hasBuildMetadata ||
-                    !value.Equals($"v{parsed}", StringComparison.Ordinal))
-                {
-                    return false;
-                }
-
-                version = parsed;
-                return true;
-            }
-
-            public static bool TryParse(string? value, out SemanticVersion version)
-            {
-                version = default;
-                if (string.IsNullOrWhiteSpace(value) || !value.Equals(value.Trim(), StringComparison.Ordinal))
-                    return false;
-
-                string text = value;
-                if (text.StartsWith('v'))
-                    text = text[1..];
-
-                int plusIndex = text.IndexOf('+');
-                string? build = null;
-                if (plusIndex >= 0)
-                {
-                    if (text.IndexOf('+', plusIndex + 1) >= 0)
-                        return false;
-                    build = text[(plusIndex + 1)..];
-                    text = text[..plusIndex];
-                }
-
-                int dashIndex = text.IndexOf('-');
-                string? preRelease = null;
-                if (dashIndex >= 0)
-                {
-                    preRelease = text[(dashIndex + 1)..];
-                    text = text[..dashIndex];
-                }
-
-                string[] core = text.Split('.');
-                if (core.Length != 3 ||
-                    !TryParseCoreNumber(core[0], out int major) ||
-                    !TryParseCoreNumber(core[1], out int minor) ||
-                    !TryParseCoreNumber(core[2], out int patch))
-                {
-                    return false;
-                }
-
-                string[] preReleaseParts = string.IsNullOrEmpty(preRelease)
-                    ? Array.Empty<string>()
-                    : preRelease.Split('.');
-                if (preRelease != null &&
-                    (preReleaseParts.Any(part => !IsValidIdentifier(part)) ||
-                     preReleaseParts.Any(part => IsNumericIdentifier(part) && part.Length > 1 && part[0] == '0')))
-                {
-                    return false;
-                }
-
-                if (build != null && build.Split('.').Any(part => !IsValidIdentifier(part)))
-                    return false;
-
-                version = new SemanticVersion(major, minor, patch, preReleaseParts, build != null);
-                return true;
-            }
-
-            public int CompareTo(SemanticVersion other)
-            {
-                int comparison = _major.CompareTo(other._major);
-                if (comparison != 0)
-                    return comparison;
-                comparison = _minor.CompareTo(other._minor);
-                if (comparison != 0)
-                    return comparison;
-                comparison = _patch.CompareTo(other._patch);
-                if (comparison != 0)
-                    return comparison;
-
-                string[] leftPreRelease = _preRelease ?? Array.Empty<string>();
-                string[] rightPreRelease = other._preRelease ?? Array.Empty<string>();
-                if (leftPreRelease.Length == 0 || rightPreRelease.Length == 0)
-                    return leftPreRelease.Length == rightPreRelease.Length ? 0 : leftPreRelease.Length == 0 ? 1 : -1;
-
-                int commonLength = Math.Min(leftPreRelease.Length, rightPreRelease.Length);
-                for (int index = 0; index < commonLength; index++)
-                {
-                    comparison = CompareIdentifier(leftPreRelease[index], rightPreRelease[index]);
-                    if (comparison != 0)
-                        return comparison;
-                }
-
-                return leftPreRelease.Length.CompareTo(rightPreRelease.Length);
-            }
-
-            public override string ToString()
-            {
-                string core = $"{_major}.{_minor}.{_patch}";
-                return (_preRelease?.Length ?? 0) == 0
-                    ? core
-                    : $"{core}-{string.Join('.', _preRelease ?? Array.Empty<string>())}";
-            }
-
-            private static bool TryParseCoreNumber(string value, out int number)
-            {
-                number = 0;
-                return IsNumericIdentifier(value) &&
-                       (value.Length == 1 || value[0] != '0') &&
-                       int.TryParse(value, out number);
-            }
-
-            private static bool IsValidIdentifier(string value)
-                => value.Length > 0 && value.All(character =>
-                    (character >= '0' && character <= '9') ||
-                    (character >= 'A' && character <= 'Z') ||
-                    (character >= 'a' && character <= 'z') ||
-                    character == '-');
-
-            private static bool IsNumericIdentifier(string value)
-                => value.Length > 0 && value.All(character => character >= '0' && character <= '9');
-
-            private static int CompareIdentifier(string left, string right)
-            {
-                bool leftNumeric = IsNumericIdentifier(left);
-                bool rightNumeric = IsNumericIdentifier(right);
-                if (leftNumeric != rightNumeric)
-                    return leftNumeric ? -1 : 1;
-                if (!leftNumeric)
-                    return string.Compare(left, right, StringComparison.Ordinal);
-
-                int lengthComparison = left.Length.CompareTo(right.Length);
-                return lengthComparison != 0
-                    ? lengthComparison
-                    : string.Compare(left, right, StringComparison.Ordinal);
-            }
-        }
-
-        private sealed class GitHubRelease
-        {
-            [JsonPropertyName("tag_name")]
-            public string TagName { get; set; } = string.Empty;
-
-            [JsonPropertyName("draft")]
-            public bool Draft { get; set; }
-
-            [JsonPropertyName("prerelease")]
-            public bool Prerelease { get; set; }
-
-            [JsonPropertyName("assets")]
-            public List<GitHubReleaseAsset> Assets { get; set; } = new();
-        }
-
-        private sealed class GitHubReleaseAsset
-        {
-            [JsonPropertyName("name")]
-            public string Name { get; set; } = string.Empty;
-
-            [JsonPropertyName("browser_download_url")]
-            public string DownloadUrl { get; set; } = string.Empty;
-
-            [JsonPropertyName("size")]
-            public long Size { get; set; }
-
-            [JsonPropertyName("digest")]
-            public string? Digest { get; set; }
-        }
+        internal static bool IsSafeArchivePath(string? entryFullName)
+            => AppUpdateService.IsSafeArchivePath(entryFullName);
 
         private void ApplyDialogTheme(bool dark)
         {
@@ -1964,8 +1395,17 @@ namespace WorkMonitorSwitcher
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
+            ClampToWorkingArea(Screen.FromControl(this).WorkingArea);
             var palette = _chkDark.Checked ? ThemePalette.Dark() : ThemePalette.Light();
             ApplyTitleBarTheme(palette, _chkDark.Checked);
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            _updateCancellation?.Cancel();
+            if (_ownsUpdateService)
+                _updateService.Dispose();
+            base.OnFormClosed(e);
         }
 
         protected override void OnActivated(EventArgs e)
@@ -2031,7 +1471,7 @@ namespace WorkMonitorSwitcher
             var boxFill = dark ? Color.FromArgb(58, 58, 58) : Color.FromArgb(222, 222, 222);
             var boxBorder = dark ? Color.FromArgb(96, 96, 96) : Color.FromArgb(160, 160, 160);
             var checkColor = dark ? Color.FromArgb(132, 132, 132) : Color.FromArgb(130, 130, 130);
-            const int boxSize = 14;
+            int boxSize = _grid.LogicalToDeviceUnits(14);
             var boxBounds = new Rectangle(
                 e.CellBounds.Left + ((e.CellBounds.Width - boxSize) / 2),
                 e.CellBounds.Top + ((e.CellBounds.Height - boxSize) / 2),
@@ -2047,14 +1487,14 @@ namespace WorkMonitorSwitcher
             if (!isChecked)
                 return;
 
-            using var checkPen = new Pen(checkColor, 2f);
+            using var checkPen = new Pen(checkColor, _grid.LogicalToDeviceUnits(2));
             checkPen.StartCap = System.Drawing.Drawing2D.LineCap.Round;
             checkPen.EndCap = System.Drawing.Drawing2D.LineCap.Round;
             graphics.DrawLines(checkPen, new[]
             {
-                new Point(boxBounds.Left + 3, boxBounds.Top + 7),
-                new Point(boxBounds.Left + 6, boxBounds.Top + 10),
-                new Point(boxBounds.Left + 11, boxBounds.Top + 4)
+                new Point(boxBounds.Left + _grid.LogicalToDeviceUnits(3), boxBounds.Top + _grid.LogicalToDeviceUnits(7)),
+                new Point(boxBounds.Left + _grid.LogicalToDeviceUnits(6), boxBounds.Top + _grid.LogicalToDeviceUnits(10)),
+                new Point(boxBounds.Left + _grid.LogicalToDeviceUnits(11), boxBounds.Top + _grid.LogicalToDeviceUnits(4))
             });
         }
 

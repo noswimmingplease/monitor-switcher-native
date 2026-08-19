@@ -186,10 +186,10 @@ namespace WorkMonitorSwitcher.Services
         {
             _ = monitorId;
 
-            if (IsCredibleSerial(serial))
-                return $"SN:{serial!.Trim()}";
             if (!string.IsNullOrWhiteSpace(instanceId))
                 return $"IID:{NormalizeStable(instanceId)}";
+            if (IsCredibleSerial(serial))
+                return $"SN:{serial!.Trim()}";
             if (!string.IsNullOrWhiteSpace(monitorKey))
                 return $"MK:{NormalizeStable(monitorKey)}";
             if (!string.IsNullOrWhiteSpace(deviceName))
@@ -203,6 +203,14 @@ namespace WorkMonitorSwitcher.Services
             if (monitors.Count == 0)
                 return;
 
+            var uniqueSerials = UniqueIdentityValues(
+                monitors,
+                monitor => IsCredibleSerial(monitor.SerialNumber) ? monitor.SerialNumber : null);
+            var uniqueInstanceIds = UniqueIdentityValues(monitors, monitor => monitor.InstanceId);
+            var uniqueMonitorKeys = UniqueIdentityValues(monitors, monitor => monitor.MonitorKey);
+            var uniqueNativeTargets = UniqueIdentityValues(monitors, monitor => monitor.NativeTargetPath);
+            var uniqueDeviceNames = UniqueIdentityValues(monitors, monitor => monitor.DeviceName);
+
             foreach (var monitor in monitors)
             {
                 var serial = NormalizeStable(monitor.SerialNumber);
@@ -210,29 +218,27 @@ namespace WorkMonitorSwitcher.Services
                 var monitorKey = NormalizeStable(monitor.MonitorKey);
                 var nativeTargetPath = NormalizeStable(monitor.NativeTargetPath);
 
-                // Prefer identities whose value does not change merely because
-                // another same-model monitor is connected or removed. Duplicate
-                // EDID serials deliberately fall through to per-device identity.
-                if (serial.Length > 0 &&
-                    monitors.Count(candidate =>
-                        IsCredibleSerial(candidate.SerialNumber) &&
-                        NormalizeStable(candidate.SerialNumber).Equals(serial, StringComparison.OrdinalIgnoreCase)) == 1)
-                {
-                    monitor.StableKey = $"SN:{monitor.SerialNumber.Trim()}";
-                }
-                else if (instanceId.Length > 0)
+                // A unique Windows instance remains deterministic when another
+                // monitor with the same EDID serial is connected or removed.
+                // Serial identity remains the cross-port reconciliation hint,
+                // but it must not make the UI key population-dependent.
+                if (uniqueInstanceIds.Contains(instanceId))
                 {
                     monitor.StableKey = $"IID:{instanceId}";
                 }
-                else if (monitorKey.Length > 0)
+                else if (IsCredibleSerial(monitor.SerialNumber) && uniqueSerials.Contains(serial))
                 {
-                    monitor.StableKey = $"MK:{monitorKey}";
+                    monitor.StableKey = $"SN:{monitor.SerialNumber.Trim()}";
                 }
-                else if (nativeTargetPath.Length > 0)
+                else if (uniqueNativeTargets.Contains(nativeTargetPath))
                 {
                     monitor.StableKey = $"NTP:{nativeTargetPath}";
                 }
-                else if (!string.IsNullOrWhiteSpace(monitor.DeviceName))
+                else if (uniqueMonitorKeys.Contains(monitorKey))
+                {
+                    monitor.StableKey = $"MK:{monitorKey}";
+                }
+                else if (uniqueDeviceNames.Contains(NormalizeStable(monitor.DeviceName)))
                 {
                     monitor.StableKey = $"DEV:{NormalizeStable(monitor.DeviceName)}";
                 }
