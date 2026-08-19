@@ -32,7 +32,7 @@ Disconnected hardware cannot always be distinguished from a driver-retained inac
 
 ## Settings
 
-Settings is split into **General**, **Monitors** and **Profiles** tabs. It includes:
+Settings is split into compact **General**, **Monitors** and **Profiles** sections. Monitor information appears beneath the attached-monitor list, which grows with the detected monitor count and scrolls after eight rows. Settings includes:
 
 - Editable monitor aliases.
 - Fallback primary selection for safely disabling the current Windows primary display.

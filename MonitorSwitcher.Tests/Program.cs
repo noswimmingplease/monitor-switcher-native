@@ -76,6 +76,7 @@ var tests = new List<(string Name, Action Body)>
     ("UiSettings disables startup profile application by default", UiSettingsDisablesStartupProfileApplicationByDefault),
     ("Profile set-change confirmation follows the disable confirmation setting", ProfileSetChangeConfirmationFollowsSetting),
     ("Profile Apply is enabled only for a verified monitor-set difference", ProfileApplyRequiresVerifiedDifference),
+    ("Settings monitor list sizes to the attached count with a safe cap", SettingsMonitorRowsFollowAttachedCount),
     ("Form1 caps large monitor lists and reserves scrollbar width", Form1CapsLargeMonitorLists),
 };
 
@@ -2345,6 +2346,18 @@ static void ProfileApplyRequiresVerifiedDifference()
         "Expected an invalid profile pair to disable Apply.");
     AssertFalse(Form1.ShouldEnableProfileApply(true, true, false, false),
         "Expected another running display action to disable Apply.");
+}
+
+static void SettingsMonitorRowsFollowAttachedCount()
+{
+    AssertEquals(1, AliasSettingsForm.CalculateVisibleMonitorRows(0),
+        "Expected an empty settings list to retain one usable row of height.");
+    AssertEquals(1, AliasSettingsForm.CalculateVisibleMonitorRows(1),
+        "Expected a one-monitor setup not to reserve extra rows.");
+    AssertEquals(4, AliasSettingsForm.CalculateVisibleMonitorRows(4),
+        "Expected the settings grid to follow the attached monitor count.");
+    AssertEquals(8, AliasSettingsForm.CalculateVisibleMonitorRows(30),
+        "Expected large monitor sets to scroll after eight visible rows.");
 }
 
 static void Form1CapsLargeMonitorLists()

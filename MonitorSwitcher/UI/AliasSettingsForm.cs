@@ -51,8 +51,8 @@ namespace WorkMonitorSwitcher
         private readonly CheckBox _chkStartup = new() { Text = "Start with Windows", AutoSize = true };
         private readonly CheckBox _chkConfirmDisable = new() { Text = "Confirm before disabling", AutoSize = true };
         private readonly CheckBox _chkRestoreLayoutOnStartup = new() { Text = "Apply monitor profile on app start", AutoSize = true };
-        private readonly Button _layoutProfileButton = new() { Text = "Default", AutoSize = false, Size = new Size(150, 26), TextAlign = ContentAlignment.MiddleLeft };
-        private readonly Button _deleteProfile = new ThemedButton { Text = "Delete Profile", AutoSize = false, Size = new Size(96, 26), Tone = ThemedButtonTone.Danger };
+        private readonly Button _layoutProfileButton = new() { Text = "Default", AutoSize = true, MinimumSize = new Size(160, 30), TextAlign = ContentAlignment.MiddleLeft };
+        private readonly Button _deleteProfile = new ThemedButton { Text = "Delete Profile", AutoSize = true, MinimumSize = new Size(106, 30), Tone = ThemedButtonTone.Danger };
         private readonly TextBox _details = new() { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical };
         private readonly BindingList<AliasViewRow> _rows;
         private readonly string _diagnosticsText;
@@ -135,8 +135,8 @@ namespace WorkMonitorSwitcher
             {
                 // Non-fatal: the dialog can still open without a title bar icon.
             }
-            MinimumSize = new Size(920, 430);
-            Size = new Size(1120, 660);
+            MinimumSize = new Size(760, 480);
+            Size = new Size(900, 540);
             _chkDark.Checked = darkMode;
             _chkTopMost.Checked = alwaysOnTop;
             _chkTray.Checked = minimizeToTray;
@@ -150,8 +150,8 @@ namespace WorkMonitorSwitcher
             _grid.ClipboardCopyMode = DataGridViewClipboardCopyMode.EnableWithoutHeaderText;
             _grid.BorderStyle = BorderStyle.None;
             _grid.RowTemplate.Height = 28;
-            _grid.MinimumSize = new Size(700, 0);
-            _details.MinimumSize = new Size(320, 0);
+            _grid.MinimumSize = Size.Empty;
+            _details.MinimumSize = new Size(0, 120);
 
             // Columns
             var shortKeyCol = new DataGridViewTextBoxColumn
@@ -335,29 +335,22 @@ namespace WorkMonitorSwitcher
             commitActions.Controls.Add(_cancel);
             bottom.Controls.Add(commitActions, 1, 0);
 
-            var tabs = new TabControl
-            {
-                Dock = DockStyle.Fill,
-                Padding = new Point(16, 6)
-            };
-            var generalPage = new TabPage("General") { Padding = new Padding(14) };
-            var monitorsPage = new TabPage("Monitors") { Padding = new Padding(8) };
-            var profilesPage = new TabPage("Profiles") { Padding = new Padding(16) };
-            tabs.TabPages.Add(generalPage);
-            tabs.TabPages.Add(monitorsPage);
-            tabs.TabPages.Add(profilesPage);
+            var generalPage = new Panel { Dock = DockStyle.Fill, Padding = new Padding(14), AutoScroll = true };
+            var monitorsPage = new Panel { Dock = DockStyle.Fill, Padding = new Padding(14), AutoScroll = true };
+            var profilesPage = new Panel { Dock = DockStyle.Fill, Padding = new Padding(14), AutoScroll = true };
 
             var generalLayout = new TableLayoutPanel
             {
-                Dock = DockStyle.Fill,
+                Dock = DockStyle.Top,
+                Height = 250,
                 ColumnCount = 2,
                 RowCount = 2,
                 Padding = new Padding(4)
             };
             generalLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
             generalLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-            generalLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            generalLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 92));
+            generalLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 158));
+            generalLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 84));
 
             var appearanceGroup = new GroupBox
             {
@@ -407,16 +400,30 @@ namespace WorkMonitorSwitcher
 
             var monitorLayout = new TableLayoutPanel
             {
-                Dock = DockStyle.Fill,
-                ColumnCount = 2,
-                RowCount = 2
+                Dock = DockStyle.Top,
+                ColumnCount = 1,
+                RowCount = 3
             };
-            monitorLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 72));
-            monitorLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 28));
-            monitorLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            int visibleMonitorRows = CalculateVisibleMonitorRows(_rows.Count);
+            int monitorGridHeight = _grid.ColumnHeadersHeight + (visibleMonitorRows * _grid.RowTemplate.Height) + 4;
+            int monitorDetailsHeight = 170;
+            monitorLayout.Height = monitorGridHeight + monitorDetailsHeight + 44;
+            monitorLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            monitorLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, monitorGridHeight));
+            monitorLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, monitorDetailsHeight));
             monitorLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
             monitorLayout.Controls.Add(_grid, 0, 0);
-            monitorLayout.Controls.Add(_details, 1, 0);
+
+            var detailsGroup = new GroupBox
+            {
+                Text = "Selected monitor information",
+                Dock = DockStyle.Fill,
+                Padding = new Padding(10, 20, 10, 10),
+                Margin = new Padding(0, 12, 0, 4)
+            };
+            detailsGroup.Controls.Add(_details);
+            monitorLayout.Controls.Add(detailsGroup, 0, 1);
+
             var monitorActions = new FlowLayoutPanel
             {
                 Dock = DockStyle.Fill,
@@ -426,28 +433,27 @@ namespace WorkMonitorSwitcher
             };
             monitorActions.Controls.Add(_openRegistry);
             monitorActions.Controls.Add(_remove);
-            monitorLayout.Controls.Add(monitorActions, 0, 1);
-            monitorLayout.SetColumnSpan(monitorActions, 2);
+            monitorLayout.Controls.Add(monitorActions, 0, 2);
             monitorsPage.Controls.Add(monitorLayout);
 
             var profileGroup = new GroupBox
             {
                 Text = "Saved monitor profiles",
                 Dock = DockStyle.Top,
-                Height = 118,
-                Padding = new Padding(14, 22, 14, 12)
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Padding = new Padding(14, 22, 14, 14)
             };
             var profileDescription = new Label
             {
                 Text = "Choose the profile used by the main window. Changes are applied when you save these settings.",
-                Dock = DockStyle.Top,
-                AutoSize = false,
-                Height = 30
+                AutoSize = true,
+                Margin = new Padding(0, 0, 0, 12)
             };
             var profileActions = new FlowLayoutPanel
             {
-                Dock = DockStyle.Bottom,
-                Height = 40,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 FlowDirection = FlowDirection.LeftToRight,
                 WrapContents = false
             };
@@ -455,20 +461,104 @@ namespace WorkMonitorSwitcher
             {
                 Text = "Selected profile",
                 AutoSize = true,
-                Margin = new Padding(0, 5, 8, 0)
+                Margin = new Padding(0, 7, 8, 0)
             };
             _layoutProfileButton.Margin = new Padding(0, 0, 8, 0);
             _deleteProfile.Margin = new Padding(0, 0, 8, 0);
             profileActions.Controls.Add(profileLabel);
             profileActions.Controls.Add(_layoutProfileButton);
             profileActions.Controls.Add(_deleteProfile);
-            profileGroup.Controls.Add(profileDescription);
-            profileGroup.Controls.Add(profileActions);
+            var profileContent = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                FlowDirection = FlowDirection.TopDown,
+                WrapContents = false
+            };
+            profileContent.Controls.Add(profileDescription);
+            profileContent.Controls.Add(profileActions);
+            profileGroup.Controls.Add(profileContent);
             profilesPage.Controls.Add(profileGroup);
 
-            Controls.Add(tabs);
+            var pageHost = new Panel { Dock = DockStyle.Fill };
+            pageHost.Controls.Add(profilesPage);
+            pageHost.Controls.Add(monitorsPage);
+            pageHost.Controls.Add(generalPage);
+
+            var generalButton = new ThemedButton { Text = "General", Size = new Size(92, 32), Tone = ThemedButtonTone.Primary };
+            var monitorsButton = new ThemedButton { Text = "Monitors", Size = new Size(92, 32) };
+            var profilesButton = new ThemedButton { Text = "Profiles", Size = new Size(92, 32) };
+            var navigation = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false,
+                Padding = new Padding(14, 7, 14, 7)
+            };
+            foreach (var button in new[] { generalButton, monitorsButton, profilesButton })
+            {
+                button.Margin = new Padding(0, 0, 8, 0);
+                navigation.Controls.Add(button);
+            }
+
+            void ShowPage(Panel page, ThemedButton selectedButton, bool resizeWindow = true)
+            {
+                generalPage.Visible = ReferenceEquals(page, generalPage);
+                monitorsPage.Visible = ReferenceEquals(page, monitorsPage);
+                profilesPage.Visible = ReferenceEquals(page, profilesPage);
+                page.BringToFront();
+
+                var palette = _chkDark.Checked ? ThemePalette.Dark() : ThemePalette.Light();
+                foreach (var button in new[] { generalButton, monitorsButton, profilesButton })
+                {
+                    button.Tone = ReferenceEquals(button, selectedButton)
+                        ? ThemedButtonTone.Primary
+                        : ThemedButtonTone.Neutral;
+                    Themer.ApplyButtonStyle(button, palette);
+                }
+
+                if (resizeWindow)
+                {
+                    int contentHeight = ReferenceEquals(page, generalPage)
+                        ? generalLayout.Height
+                        : ReferenceEquals(page, monitorsPage)
+                            ? monitorLayout.Height
+                            : Math.Max(profileGroup.Height, profileGroup.PreferredSize.Height);
+                    int desiredClientHeight = 46 + bottom.Height + page.Padding.Vertical + contentHeight + 12;
+                    int maxClientHeight = Math.Max(300, Screen.FromControl(this).WorkingArea.Height - 80);
+                    ClientSize = new Size(ClientSize.Width, Math.Min(desiredClientHeight, maxClientHeight));
+                }
+            }
+
+            generalButton.Click += (_, __) => ShowPage(generalPage, generalButton);
+            monitorsButton.Click += (_, __) => ShowPage(monitorsPage, monitorsButton);
+            profilesButton.Click += (_, __) => ShowPage(profilesPage, profilesButton);
+
+            var navigationSeparator = new Panel
+            {
+                Dock = DockStyle.Fill,
+                Height = 1,
+                BackColor = (darkMode ? ThemePalette.Dark() : ThemePalette.Light()).Border
+            };
+            var settingsShell = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 3
+            };
+            settingsShell.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            settingsShell.RowStyles.Add(new RowStyle(SizeType.Absolute, 45));
+            settingsShell.RowStyles.Add(new RowStyle(SizeType.Absolute, 1));
+            settingsShell.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            settingsShell.Controls.Add(navigation, 0, 0);
+            settingsShell.Controls.Add(navigationSeparator, 0, 1);
+            settingsShell.Controls.Add(pageHost, 0, 2);
+
+            Controls.Add(settingsShell);
             Controls.Add(bottom);
             FitInitialSizeToContent(monitorActions, commitActions, sizingOwner);
+            ShowPage(generalPage, generalButton);
             UpdatePrimaryFallbackCellStates();
 
             AcceptButton = _ok;
@@ -477,7 +567,11 @@ namespace WorkMonitorSwitcher
             // Initial theme
             ApplyDialogTheme(darkMode);
 
-            _chkDark.CheckedChanged += (s, e) => ApplyDialogTheme(_chkDark.Checked);
+            _chkDark.CheckedChanged += (_, __) =>
+            {
+                ApplyDialogTheme(_chkDark.Checked);
+                navigationSeparator.BackColor = (_chkDark.Checked ? ThemePalette.Dark() : ThemePalette.Light()).Border;
+            };
 
             _ok.Click += (_, __) =>
             {
@@ -522,6 +616,9 @@ namespace WorkMonitorSwitcher
             return panel;
         }
 
+        internal static int CalculateVisibleMonitorRows(int monitorCount)
+            => Math.Clamp(monitorCount, 1, 8);
+
         private void FitInitialSizeToContent(
             FlowLayoutPanel monitorActions,
             FlowLayoutPanel commitActions,
@@ -533,21 +630,21 @@ namespace WorkMonitorSwitcher
                 SystemInformation.VerticalScrollBarWidth +
                 16;
 
-            int monitorAreaWidth = gridMinWidth + _details.MinimumSize.Width + 44;
+            int monitorAreaWidth = gridMinWidth + 48;
             int bottomWidth =
                 PreferredControlsWidth(monitorActions.Controls) +
                 PreferredControlsWidth(commitActions.Controls) +
                 72;
 
             int desiredClientWidth = Math.Max(
-                1120,
+                880,
                 Math.Max(monitorAreaWidth, bottomWidth));
 
-            int visibleRows = Math.Min(Math.Max(_rows.Count, 5), 9);
-            int desiredGridHeight = _grid.ColumnHeadersHeight + (visibleRows * _grid.RowTemplate.Height) + 76;
+            int visibleRows = Math.Min(Math.Max(_rows.Count, 3), 8);
+            int desiredGridHeight = _grid.ColumnHeadersHeight + (visibleRows * _grid.RowTemplate.Height) + 4;
             int desiredClientHeight = Math.Max(
-                640,
-                54 + desiredGridHeight + 78);
+                500,
+                46 + 54 + desiredGridHeight + 170 + 72);
 
             var screen = sizingOwner != null && !sizingOwner.IsDisposed
                 ? Screen.FromControl(sizingOwner)
@@ -561,8 +658,8 @@ namespace WorkMonitorSwitcher
                 Math.Min(desiredClientHeight, maxClientHeight));
 
             var minimumClientSize = new Size(
-                Math.Min(920, maxClientWidth),
-                Math.Min(560, maxClientHeight));
+                Math.Min(760, maxClientWidth),
+                Math.Min(300, maxClientHeight));
 
             MinimumSize = SizeFromClientSize(minimumClientSize);
             ClientSize = desiredClientSize;
@@ -1700,14 +1797,44 @@ namespace WorkMonitorSwitcher
             // Apply palette to this form and its controls
             Themer.Apply(this, palette);
 
-            // Title bar
-            DwmInterop.SetDarkTitleBar(this.Handle, dark);
+            ApplyTitleBarTheme(palette, dark);
             BuildLayoutProfileMenu();
             UpdatePrimaryFallbackCellStates();
 
-            // We don’t set caption color here; leaving it to system accent avoids visual mismatch
             Invalidate(true);
             Update();
+        }
+
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            var palette = _chkDark.Checked ? ThemePalette.Dark() : ThemePalette.Light();
+            ApplyTitleBarTheme(palette, _chkDark.Checked);
+        }
+
+        protected override void OnActivated(EventArgs e)
+        {
+            base.OnActivated(e);
+            var palette = _chkDark.Checked ? ThemePalette.Dark() : ThemePalette.Light();
+            ApplyTitleBarTheme(palette, _chkDark.Checked);
+        }
+
+        protected override void OnDeactivate(EventArgs e)
+        {
+            base.OnDeactivate(e);
+            var palette = _chkDark.Checked ? ThemePalette.Dark() : ThemePalette.Light();
+            ApplyTitleBarTheme(palette, _chkDark.Checked);
+        }
+
+        private void ApplyTitleBarTheme(ThemePalette palette, bool dark)
+        {
+            if (!IsHandleCreated)
+                return;
+
+            DwmInterop.SetDarkTitleBar(Handle, dark);
+            DwmInterop.SetCaptionColor(
+                Handle,
+                WindowsTheme.AccentColor() ?? (dark ? palette.Surface : palette.Back));
         }
 
         private bool IsFallbackPrimaryCell(int rowIndex, int columnIndex)
