@@ -51,7 +51,7 @@ namespace WorkMonitorSwitcher
         private readonly CheckBox _chkStartup = new() { Text = "Start with Windows", AutoSize = true };
         private readonly CheckBox _chkConfirmDisable = new() { Text = "Confirm before disabling", AutoSize = true };
         private readonly CheckBox _chkAutoSaveLayout = new() { Text = "Auto-save layout before disabling", AutoSize = true };
-        private readonly CheckBox _chkRestoreLayoutOnStartup = new() { Text = "Restore layout on app start", AutoSize = true };
+        private readonly CheckBox _chkRestoreLayoutOnStartup = new() { Text = "Apply monitor profile on app start", AutoSize = true };
         private readonly Button _layoutProfileButton = new() { Text = "Default", AutoSize = false, Size = new Size(150, 26), TextAlign = ContentAlignment.MiddleLeft };
         private readonly Button _deleteProfile = new ThemedButton { Text = "Delete Profile", AutoSize = false, Size = new Size(96, 26), Tone = ThemedButtonTone.Danger };
         private readonly TextBox _details = new() { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical };
@@ -182,33 +182,23 @@ namespace WorkMonitorSwitcher
                 FillWeight = 28,
                 MinimumWidth = 160
             };
-            var primaryCol = new DataGridViewCheckBoxColumn
-
-            {
-                HeaderText = "Primary",
-                DataPropertyName = nameof(AliasViewRow.IsPreferredPrimary),
-                ReadOnly = false,
-                FillWeight = 10,
-                MinimumWidth = 70
-            };
-
-            primaryCol.ThreeState = false;
             var fallbackPrimaryCol = new DataGridViewCheckBoxColumn
             {
-                HeaderText = "Fallback",
+                HeaderText = "Primary fallback",
                 DataPropertyName = nameof(AliasViewRow.IsFallbackPrimary),
                 ReadOnly = false,
-                FillWeight = 10,
-                MinimumWidth = 76
+                FillWeight = 14,
+                MinimumWidth = 110
             };
             fallbackPrimaryCol.ThreeState = false;
 
+            foreach (var row in _rows)
+                row.IsPreferredPrimary = false;
             NormalisePrimaryFallbackRows();
 
             _grid.Columns.Add(shortKeyCol);
             _grid.Columns.Add(regCol);
             _grid.Columns.Add(aliasCol);
-            _grid.Columns.Add(primaryCol);
             _grid.Columns.Add(fallbackPrimaryCol);
             _grid.DataSource = _rows;
             _grid.EditMode = DataGridViewEditMode.EditOnEnter;
@@ -316,7 +306,7 @@ namespace WorkMonitorSwitcher
             _toolTip.SetToolTip(_chkStartup, "Start Monitor Switcher when you sign in to Windows.");
             _toolTip.SetToolTip(_chkConfirmDisable, "Ask before disabling a monitor directly or by applying a layout profile.");
             _toolTip.SetToolTip(_chkAutoSaveLayout, "Overwrite the selected layout profile before disabling a monitor. A backup is kept first.");
-            _toolTip.SetToolTip(_chkRestoreLayoutOnStartup, "Apply the selected layout profile when Monitor Switcher starts. Use with Start with Windows to repair boot-time display drift.");
+            _toolTip.SetToolTip(_chkRestoreLayoutOnStartup, "Apply only the selected profile's enabled monitor set when Monitor Switcher starts. Windows keeps position and orientation.");
             _toolTip.SetToolTip(_layoutProfileButton, "Current layout profile used by the main window.");
             _toolTip.SetToolTip(_deleteProfile, "Delete the selected saved layout profile. Default cannot be deleted.");
             _toolTip.SetToolTip(_remove, "Remove selected saved monitor entries.");
@@ -671,7 +661,6 @@ namespace WorkMonitorSwitcher
             var row = _rows[rowIndex];
             _details.Text =
                 $"Alias: {row.Alias}{Environment.NewLine}" +
-                $"Preferred primary: {(row.IsPreferredPrimary ? "Yes" : "No")}{Environment.NewLine}" +
                 $"Fallback primary: {(row.IsFallbackPrimary ? "Yes" : "No")}{Environment.NewLine}" +
                 $"{Environment.NewLine}" +
                 $"Stable key:{Environment.NewLine}{row.StableKeyFull}{Environment.NewLine}" +

@@ -9,9 +9,9 @@ Source repository: https://github.com/Ci303/monitor-switcher-native
 - Detects arbitrary numbers of active, disabled, added and disconnected monitors using Windows display APIs.
 - Shows currently connected monitors, including disabled but still-present displays, with their activity state and a quick enable or disable action.
 - Supports smooth drag-and-drop ordering from each card's three-line handle and retains that order by physical monitor identity.
-- Saves and restores named layouts, including position, resolution, orientation and primary display.
-- Restores a selected profile after a physical reconnection or at sign-in when the monitor set matches safely.
-- Supports a preferred primary display, fallback primary display, dark mode, always-on-top and notification-area operation.
+- Saves and applies named monitor profiles that control which physical displays are enabled.
+- Uses Windows Display Settings as the sole authority for position, resolution, orientation and primary display.
+- Supports a fallback primary display, dark mode, always-on-top and notification-area operation.
 - Opens saved monitor registry keys and records recent display actions for diagnosis.
 
 Monitor Switcher does not download, install or execute a third-party monitor utility. Detection and topology changes use Windows CCD (`QueryDisplayConfig` and `SetDisplayConfig`) directly.
@@ -28,33 +28,33 @@ The application is designed for an extended desktop. Cloned or mirrored paths ar
 
 Monitor Switcher scans displays at start-up, when Windows reports a display or device change, and when **Refresh** is selected. Windows CCD supplies the active and available paths. Device-interface paths and reliable EDID serials are used for exact matching, so saved aliases can follow a physical display when Windows changes `\\.\DISPLAYn` names. Displays that report missing or duplicate identities fail closed where a physical match cannot be proved.
 
-Disconnected hardware cannot always be distinguished from a driver-retained inactive path. The main monitor list therefore shows only displays that Windows currently reports as present, including present displays that are disabled. Saved identity and alias metadata remain stored when a monitor is absent so it can be recognised after reconnection. Automatic restore is attempted only when the complete current set can be matched reliably; inconclusive matches do not change the topology.
+Disconnected hardware cannot always be distinguished from a driver-retained inactive path. The main monitor list therefore shows only displays that Windows currently reports as present, including present displays that are disabled. Saved identity and alias metadata remain stored when a monitor is absent so it can be recognised after reconnection. Reconnection never causes Monitor Switcher to overwrite the arrangement chosen in Windows Display Settings.
 
 ## Settings
 
 Settings includes:
 
 - Editable monitor aliases.
-- Preferred and fallback primary display selection.
+- Fallback primary selection for safely disabling the current Windows primary display.
 - Dark mode and always-on-top toggles.
-- Minimise-to-tray, start-with-Windows, restore-layout-on-app-start and confirm-before-disable options.
+- Minimise-to-tray, start-with-Windows, apply-profile-on-app-start and confirm-before-disable options.
 - **Open Registry**, including double-click support for a monitor registry-key cell.
 - **Update App** for downloading the latest stable GitHub release. The updater requires the exact release archive and matching `.sha256`, validates both, and extracts the update separately without replacing the running installation.
 - A monitor identity details panel and recent diagnostics.
 
 ## Layout Profiles
 
-Press **Save** to name and capture the current arrangement. Press **Restore** to apply the selected profile. Selecting a different profile in Settings changes the Settings action to **Save & Apply**, which saves the settings and applies that profile as one guarded operation.
+Press **Save** to name and capture the currently enabled monitor set. Press **Apply** to enable the profile's monitors and disable monitors that are not in it. Selecting a different profile in Settings changes the Settings action to **Save & Apply**, which saves the settings and applies that monitor set as one guarded operation.
 
-Native profiles are versioned, app-owned configuration documents. Each active display records its strong identity, CCD adapter/target identifiers, desktop position, resolution, orientation and primary state. Profile replacement is transactional: an interrupted write is recovered or rolled back as a matched unit, and the previous valid profile is retained as a `.bak` file.
+Native profiles are versioned, app-owned configuration documents. Each active display records its strong physical identity and CCD route. Existing geometry fields remain in the file format for compatibility, but applying a profile does not use them. Profile replacement is transactional: an interrupted write is recovered or rolled back as a matched unit, and the previous valid profile is retained as a `.bak` file.
 
-Restore validates the complete requested topology before applying it, persists the accepted topology in the Windows display database, then queries Windows again to verify the active set and geometry. Automatic reconnect restore never disables an extra display. Use an explicit **Restore** only when you intend to replace the current active set.
+Apply validates the complete requested physical monitor set, asks Windows to use its own persisted arrangement for that set, then queries Windows again to verify the active set. It does not apply saved coordinates, rotation, resolution or preferred-primary state. Rearrange monitors in Windows Display Settings; those Windows settings remain authoritative.
 
-When **Confirm before disabling** is enabled, applying a profile that changes the active display set shows the saved and current active-display counts before continuing. When it is disabled, an explicit **Restore** or **Save & Apply** proceeds without that confirmation.
+When **Confirm before disabling** is enabled, applying a profile that changes the active display set asks before continuing. When it is disabled, an explicit **Apply** or **Save & Apply** proceeds without that confirmation.
 
-Profiles created by the previous external-tool version remain usable for safe geometry-only restoration when the complete active set and identity sidecar match. Exact-set restore, including activating a disabled monitor, requires a native profile; save the profile once with this version to capture the required CCD routes. Legacy files are not migrated at start-up. An explicit **Save**, or the optional automatic save-before-disable setting after an exact identity check, upgrades the selected profile transactionally.
+Profiles created by the previous external-tool version must be saved once with this version before they can enable a disabled monitor, because native CCD route identities are required. Legacy files are not migrated at start-up. An explicit **Save**, or the optional automatic save-before-disable setting after an exact identity check, upgrades the selected profile transactionally.
 
-If Windows or the graphics driver starts with the wrong rotation or position, enable both **Start with Windows** and **Restore layout on app start**. Monitor Switcher will apply the selected profile shortly after sign-in when validation succeeds.
+Enable both **Start with Windows** and **Apply monitor profile on app start** if the selected enabled-monitor set should be applied shortly after sign-in. Position and orientation are still taken from Windows, not from the profile.
 
 ## Storage
 

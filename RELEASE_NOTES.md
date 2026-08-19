@@ -5,10 +5,9 @@
 ### Fixed
 
 - Replaced the external monitor-control backend with direct Windows CCD detection and topology application; no separate monitor utility is required.
-- Physically reconnected monitors now trigger a debounced, identity-matched restore of the selected profile, including portrait rotation and saved positions while the app is hidden in the tray.
-- Passive reconnect restoration now fails closed for ambiguous, incomplete, degraded, or extra-monitor topologies and never disables an unrelated display.
-- Restores now require and verify an exact active-monitor set, so a saved profile cannot report success after applying only the monitors that were already active.
-- Added and disabled monitors are converged through Windows CCD before identity-mapped position, resolution, rotation and primary-display verification.
+- Profiles now control only which physical monitors are enabled. Profile changes, reconnects and direct Enable actions no longer reapply saved position, resolution, rotation or preferred-primary state.
+- Windows Display Settings is now authoritative for monitor arrangement. Profile application asks Windows to use its persisted configuration for the requested physical monitor set and is a no-op when that set is already active.
+- Profile application still requires and verifies an exact physical monitor set, so a partial activation cannot be reported as successful.
 - Native profile validation, cancellation and invalid topology results are no longer reported as successful saves or restores.
 - Start-up restores are cancelled when a manual display action begins, and launching a portable or rollback copy no longer retargets the existing Windows start-up entry.
 - Corrupt or missing JSON settings recover from valid backups without replacing the good backup.
@@ -17,7 +16,7 @@
 ### Improved
 
 - Monitor detection and layout work now runs asynchronously with shutdown cancellation and a visible degraded-detection warning.
-- Added versioned native profiles. Legacy profiles remain available for safe geometry-only restore and are upgraded by an explicit save, or by configured save-before-disable after an exact identity check, while retaining the previous valid profile for rollback.
+- Added versioned native profiles. Legacy profiles are upgraded by an explicit save, or by configured save-before-disable after an exact identity check, while retaining the previous valid profile for rollback.
 - Duplicate credible monitor serials now make native detection fail closed; placeholder or missing serials use exact current target paths where that remains unambiguous.
 - Large monitor lists are vertically scrollable and bounded to the current working area.
 - Refreshed the light and dark themes with clearer hierarchy, accessible primary actions, semantic status badges, softer monitor cards, and a proper degraded-detection banner.
@@ -28,14 +27,13 @@
 
 ### Added
 
-- Added an optional startup layout restore setting so Monitor Switcher can reapply the selected layout profile shortly after sign-in.
+- Added an optional startup profile setting so Monitor Switcher can reapply the selected enabled-monitor set shortly after sign-in.
 
 ## v0.3.8 - 2026-07-04
 
 ### Fixed
 
 - Reduced redundant display topology changes during monitor enable and saved-layout restore to avoid destabilising Wallpaper Engine.
-- Skipped no-op primary-monitor applies when the preferred primary is already active.
 
 ## v0.3.7 - 2026-07-03
 
@@ -46,7 +44,7 @@
 
 ### Fixed
 
-- Fixed saved-layout restore when Windows reassigns `\\.\DISPLAYn` names by matching saved layouts to physical monitor identity before applying position, resolution, and rotation.
+- Fixed profile application when Windows reassigns `\\.\DISPLAYn` names by matching saved physical monitor identities before changing the active set.
 - Stopped automatic disable actions from overwriting saved layout profiles by default.
 
 ### Improved
@@ -59,16 +57,14 @@
 ### Improved
 
 - Hardened settings and layout-profile persistence with atomic JSON writes and backup files.
-- Serialised monitor-changing actions so enable, disable, layout restore, layout save, and settings primary changes cannot overlap.
+- Serialised monitor-changing actions so enable, disable, profile apply and profile save cannot overlap.
 - Added diagnostics logging for Windows display detection failures before falling back to the active-screen view.
-- Restored saved monitor rotation and resolution as part of saved-layout topology restoration.
 
 ## v0.3.5 - 2026-06-26
 
 ### Improved
 
 - Extracted alias settings mapping and primary monitor preference resolution out of the main form to reduce future monitor-action risk.
-- Settings now applies the selected preferred primary monitor immediately on Save when that monitor is active.
 - Settings now prevents the same monitor being selected as both primary and fallback primary.
 - Settings now greys out disabled fallback primary checkboxes when the same monitor is selected as primary.
 - Renamed the Settings confirmation button from OK to Save.
@@ -82,7 +78,6 @@
 ### Improved
 
 - Settings now opens at a content-aware size so the grid, details pane, and action buttons fit without manual resizing.
-- Preferred primary is now re-applied after monitor enable and layout restore so saved-layout restoration cannot leave another monitor primary.
 - Reduced duplication in settings and enable-monitor orchestration code.
 
 ## v0.3.3 - 2026-06-26
@@ -92,7 +87,7 @@
 - Fixed duplicate phantom `DEV:` monitor rows appearing after disabling displays.
 - Fixed inactive monitor enable targeting so the app prefers the current live inactive display identity before stale saved display aliases.
 - Fixed disabling the current primary monitor by applying and verifying the Windows display topology directly.
-- Fixed saved-layout restore after re-enabling monitors so primary display and positions are reapplied from the saved layout.
+- Fixed profile application after re-enabling monitors while leaving Windows-managed position and primary-display state unchanged.
 - Fixed notification-area icon initialisation so the tray icon is assigned before it is shown.
 
 ### Improved
@@ -115,15 +110,15 @@
 
 ### Added
 
-- Added named layout profiles with prompted **Save** and explicit **Restore** actions.
-- Added notification-area support with a tray menu for open, refresh, save, restore, settings, and exit.
+- Added named monitor profiles with prompted **Save** and explicit **Apply** actions.
+- Added notification-area support with a tray menu for open, refresh, save, apply profile, settings, and exit.
 - Added Settings options for minimize-to-tray, start-with-Windows, and confirm-before-disable.
 - Added a monitor identity details panel in Settings.
 - Added a **Diagnostics** button that opens recent monitor action and layout profile events.
 
 ### Improved
 
-- Automatic restore now uses the selected layout profile.
+- Automatic startup profile application now uses the selected monitor profile.
 - Settings now shows shortened registry class paths in the grid while preserving full registry keys for tooltips, copying, details, and Regedit opening.
 - Layout profile names are sanitized before storage to avoid invalid filename characters and profile-file collisions.
 - Stale saved `DEV:` display aliases are now merged into the current stable monitor entries instead of appearing as duplicate offline monitors.

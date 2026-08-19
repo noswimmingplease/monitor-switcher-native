@@ -240,14 +240,13 @@ namespace WorkMonitorSwitcher.Services
                         ? WithRollbackDetails(activation, original)
                         : activation;
 
-                var persistence = PersistEnabledTopology(
-                    original,
-                    selectedPath.MonitorDevicePath,
-                    $"Enabled native display '{selectedPath.TargetFriendlyName}'.");
-                if (persistence.Success)
-                    return persistence;
-
-                return WithRollbackDetails(persistence, original);
+                return new DisplayTopologyResult
+                {
+                    Success = true,
+                    ValidateCode = activation.ValidateCode,
+                    ApplyCode = activation.ApplyCode,
+                    Message = $"Enabled native display '{selectedPath.TargetFriendlyName}' using a Windows-managed arrangement."
+                };
             }
             catch (Exception ex)
             {
@@ -259,9 +258,9 @@ namespace WorkMonitorSwitcher.Services
         }
 
         /// <summary>
-        /// Explicitly restores the exact target set and geometry in a native
-        /// profile. Unlike ApplyLayoutPositionsFromConfig, this method may activate
-        /// and deactivate targets and must not be used by automatic reconnect work.
+        /// Applies only the exact active target set from a native profile. Source
+        /// modes, positions, rotation and primary selection come from Windows'
+        /// persistence database and are never read from the profile here.
         /// </summary>
         public DisplayTopologyResult RestoreExactDisplaySetFromConfig(
             string layoutPath,
@@ -295,6 +294,23 @@ namespace WorkMonitorSwitcher.Services
                 if (!targetResolution.Success)
                     return Failure(targetResolution.ErrorMessage);
 
+                var requestedTargets = GetProfileMonitorSet(
+                    profile,
+                    targetResolution.TargetPathByLayoutDevice);
+                var currentTargets = original.Entries
+                    .Select(entry => NativeDisplayProfileCodec.NormaliseTargetPath(entry.MonitorDevicePath))
+                    .ToList();
+                if (currentTargets.Count == requestedTargets.Count &&
+                    currentTargets.Distinct(StringComparer.OrdinalIgnoreCase).Count() == currentTargets.Count &&
+                    requestedTargets.SetEquals(currentTargets))
+                {
+                    return new DisplayTopologyResult
+                    {
+                        Success = true,
+                        Message = "The requested monitor set is already active; Windows' arrangement was left unchanged."
+                    };
+                }
+
                 var requests = profile.Monitors.Select(monitor => new NativePathRequest(
                     targetResolution.TargetPathByLayoutDevice[monitor.LayoutDeviceName],
                     monitor.SourceAdapterLuid!.Value,
@@ -305,17 +321,21 @@ namespace WorkMonitorSwitcher.Services
                 if (!selection.Success)
                     return Failure(selection.ErrorMessage);
 
-                var primary = profile.Monitors.Single(monitor => monitor.IsPrimary);
                 var selectedByTarget = selection.Paths.ToDictionary(
                     path => NativeDisplayProfileCodec.NormaliseTargetPath(path.MonitorDevicePath),
                     StringComparer.OrdinalIgnoreCase);
-                var orderedCandidates = profile.Monitors
-                    .OrderBy(monitor => monitor.IsPrimary ? 0 : 1)
-                    .ThenBy(monitor => monitor.X)
-                    .ThenBy(monitor => monitor.Y)
-                    .Select(monitor => selectedByTarget[
-                        NativeDisplayProfileCodec.NormaliseTargetPath(
-                            targetResolution.TargetPathByLayoutDevice[monitor.LayoutDeviceName])])
+                var currentOrder = original.Entries
+                    .Select((entry, index) => new
+                    {
+                        Target = NativeDisplayProfileCodec.NormaliseTargetPath(entry.MonitorDevicePath),
+                        Index = index
+                    })
+                    .ToDictionary(item => item.Target, item => item.Index, StringComparer.OrdinalIgnoreCase);
+                var orderedCandidates = selectedByTarget.Values
+                    .OrderBy(candidate => currentOrder.TryGetValue(
+                        NativeDisplayProfileCodec.NormaliseTargetPath(candidate.MonitorDevicePath),
+                        out var index) ? index : int.MaxValue)
+                    .ThenBy(candidate => candidate.PathIndex)
                     .ToList();
                 var requestedPaths = orderedCandidates
                     .Select(candidate => allPaths.Entries.Single(entry => entry.PathIndex == candidate.PathIndex).Path)
@@ -329,61 +349,13 @@ namespace WorkMonitorSwitcher.Services
                         ? WithRollbackDetails(activation, original)
                         : activation;
 
-                var active = QueryActiveTopology();
-                var activeByTarget = active.Entries
-                    .GroupBy(entry => NativeDisplayProfileCodec.NormaliseTargetPath(entry.MonitorDevicePath),
-                        StringComparer.OrdinalIgnoreCase)
-                    .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.OrdinalIgnoreCase);
-                if (activeByTarget.Count != profile.Monitors.Count ||
-                    activeByTarget.Values.Any(entries => entries.Count != 1))
+                return new DisplayTopologyResult
                 {
-                    return WithRollbackDetails(
-                        Failure("The activated display set was not an unambiguous extended desktop."),
-                        original);
-                }
-
-                var entryByMonitor = new Dictionary<NativeDisplayProfileMonitor, PathEntry>();
-                foreach (var monitor in profile.Monitors)
-                {
-                    var targetPath = NativeDisplayProfileCodec.NormaliseTargetPath(
-                        targetResolution.TargetPathByLayoutDevice[monitor.LayoutDeviceName]);
-                    if (!activeByTarget.TryGetValue(targetPath, out var entries) || entries.Count != 1)
-                    {
-                        return WithRollbackDetails(
-                            Failure($"Saved target '{monitor.LayoutDeviceName}' was not active after topology activation."),
-                            original);
-                    }
-                    entryByMonitor[monitor] = entries[0];
-                }
-
-                var positions = entryByMonitor.ToDictionary(
-                    pair => pair.Value.SourceModeIndex,
-                    pair => new DisplayPosition(pair.Key.X, pair.Key.Y));
-                var sizes = entryByMonitor.ToDictionary(
-                    pair => pair.Value.SourceModeIndex,
-                    pair => new DisplaySize(pair.Key.Width, pair.Key.Height));
-                var rotations = entryByMonitor.ToDictionary(
-                    pair => pair.Value.SourceModeIndex,
-                    pair => pair.Key.Rotation);
-                var sourceNames = entryByMonitor.ToDictionary(
-                    pair => pair.Value.SourceModeIndex,
-                    pair => pair.Key.LayoutDeviceName);
-                var orderedEntries = profile.Monitors
-                    .OrderBy(monitor => monitor.IsPrimary ? 0 : 1)
-                    .ThenBy(monitor => monitor.X)
-                    .ThenBy(monitor => monitor.Y)
-                    .Select(monitor => entryByMonitor[monitor])
-                    .ToList();
-
-                var geometry = ValidateAndApply(
-                    active,
-                    orderedEntries,
-                    positions,
-                    $"Restored native display profile '{Path.GetFileName(layoutPath)}'.",
-                    sizes,
-                    rotations,
-                    sourceNames);
-                return geometry.Success ? geometry : WithRollbackDetails(geometry, original);
+                    Success = true,
+                    ValidateCode = activation.ValidateCode,
+                    ApplyCode = activation.ApplyCode,
+                    Message = $"Applied monitor set '{Path.GetFileName(layoutPath)}' using a Windows-managed arrangement."
+                };
             }
             catch (Exception ex)
             {
@@ -392,6 +364,21 @@ namespace WorkMonitorSwitcher.Services
                     ? WithRollbackDetails(failure, original)
                     : failure;
             }
+        }
+
+        internal static HashSet<string> GetProfileMonitorSet(
+            NativeDisplayProfile profile,
+            IReadOnlyDictionary<string, string> resolvedTargetPaths)
+        {
+            if (profile == null)
+                throw new ArgumentNullException(nameof(profile));
+            if (resolvedTargetPaths == null)
+                throw new ArgumentNullException(nameof(resolvedTargetPaths));
+
+            return profile.Monitors
+                .Select(monitor => resolvedTargetPaths[monitor.LayoutDeviceName])
+                .Select(NativeDisplayProfileCodec.NormaliseTargetPath)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
         }
 
         private static bool TryValidateExtendedDesktop(
@@ -605,64 +592,6 @@ namespace WorkMonitorSwitcher.Services
                 Message = "Native activation returned success, but exact target-set verification failed.",
                 Details = verification
             };
-        }
-
-        private static DisplayTopologyResult PersistEnabledTopology(
-            TopologySnapshot original,
-            string enabledTargetPath,
-            string successMessage)
-        {
-            var current = QueryActiveTopology();
-            if (current.Entries.Any(entry =>
-                    !entry.IsAvailable ||
-                    !NativeDisplayProfileCodec.IsStrongTargetPath(entry.MonitorDevicePath)) ||
-                current.Entries.Select(entry =>
-                        NativeDisplayProfileCodec.NormaliseTargetPath(entry.MonitorDevicePath))
-                    .Distinct(StringComparer.OrdinalIgnoreCase).Count() != current.Entries.Count ||
-                current.Entries.Select(entry =>
-                        (ToInt64(entry.Path.sourceInfo.adapterId), entry.Path.sourceInfo.id))
-                    .Distinct().Count() != current.Entries.Count)
-            {
-                return Failure("The activated topology contains an unavailable, cloned, or ambiguous target.");
-            }
-
-            var originalByTarget = original.Entries.ToDictionary(
-                entry => NativeDisplayProfileCodec.NormaliseTargetPath(entry.MonitorDevicePath),
-                StringComparer.OrdinalIgnoreCase);
-            var primaryOriginal = original.Entries.Single(entry => entry.X == 0 && entry.Y == 0);
-            var primary = current.Entries.SingleOrDefault(entry =>
-                TargetPathEquals(entry.MonitorDevicePath, primaryOriginal.MonitorDevicePath));
-            var enabled = current.Entries.SingleOrDefault(entry =>
-                TargetPathEquals(entry.MonitorDevicePath, enabledTargetPath));
-            if (primary == null || enabled == null)
-                return Failure("The original primary or newly enabled target could not be resolved after activation.");
-
-            int rightEdge = original.Entries.Max(entry => checked(
-                entry.X + CalculateEffectiveDesktopWidth(entry.Width, entry.Height, entry.Rotation)));
-            var positions = new Dictionary<int, DisplayPosition>();
-            foreach (var entry in current.Entries)
-            {
-                var targetKey = NativeDisplayProfileCodec.NormaliseTargetPath(entry.MonitorDevicePath);
-                if (originalByTarget.TryGetValue(targetKey, out var originalEntry))
-                {
-                    positions[entry.SourceModeIndex] = new DisplayPosition(originalEntry.X, originalEntry.Y);
-                }
-                else if (ReferenceEquals(entry, enabled))
-                {
-                    positions[entry.SourceModeIndex] = new DisplayPosition(rightEdge, 0);
-                }
-                else
-                {
-                    return Failure($"Unexpected target '{entry.MonitorDevicePath}' was active after native enable.");
-                }
-            }
-
-            var ordered = current.Entries
-                .OrderBy(entry => ReferenceEquals(entry, primary) ? 0 : 1)
-                .ThenBy(entry => positions[entry.SourceModeIndex].X)
-                .ThenBy(entry => positions[entry.SourceModeIndex].Y)
-                .ToList();
-            return ValidateAndApply(current, ordered, positions, successMessage);
         }
 
         private static DisplayTopologyResult WithRollbackDetails(
@@ -1711,18 +1640,6 @@ namespace WorkMonitorSwitcher.Services
 
         private static bool IsQuarterTurn(uint rotation)
             => rotation == 2 || rotation == 4;
-
-        internal static int CalculateEffectiveDesktopWidth(int sourceWidth, int sourceHeight, uint rotation)
-        {
-            if (sourceWidth <= 0)
-                throw new ArgumentOutOfRangeException(nameof(sourceWidth));
-            if (sourceHeight <= 0)
-                throw new ArgumentOutOfRangeException(nameof(sourceHeight));
-            if (rotation is < 1 or > 4)
-                throw new ArgumentOutOfRangeException(nameof(rotation));
-
-            return IsQuarterTurn(rotation) ? sourceHeight : sourceWidth;
-        }
 
         private static TopologySnapshot QueryActiveTopology()
             => QueryTopology(QdcOnlyActivePaths, includeInactivePaths: false);

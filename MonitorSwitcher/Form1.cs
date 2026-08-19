@@ -262,13 +262,13 @@ namespace WorkMonitorSwitcher
 
             _btnRestoreLayout = new ThemedButton
             {
-                Text = "Restore",
+                Text = "Apply",
                 Size = new Size(82, 32),
                 Tone = ThemedButtonTone.Primary
             };
             _btnRestoreLayout.Click += async (_, __) => await RestoreSelectedLayoutProfileAsync(showMessage: true);
             Controls.Add(_btnRestoreLayout);
-            _toolTip.SetToolTip(_btnRestoreLayout, "Restore the selected saved monitor layout.");
+            _toolTip.SetToolTip(_btnRestoreLayout, "Apply only the selected profile's enabled monitor set. Windows keeps the arrangement.");
 
             _sectionTitleLabel = new Label
             {
@@ -799,7 +799,7 @@ namespace WorkMonitorSwitcher
                 ShowMainWindowForInteraction();
                 await SaveSelectedLayoutProfileAsync();
             });
-            _trayMenu.Items.Add("Restore Layout", null, async (_, __) =>
+            _trayMenu.Items.Add("Apply Monitor Profile", null, async (_, __) =>
             {
                 ShowMainWindowForInteraction();
                 await RestoreSelectedLayoutProfileAsync(showMessage: true);
@@ -1059,99 +1059,12 @@ namespace WorkMonitorSwitcher
 
         private void ObserveReconnectLayoutState(bool allowTrigger, bool detectionIsReliable)
         {
-            if (!_profileTransactionsHealthy)
-                return;
-
-            if (!detectionIsReliable)
-            {
-                ObserveDefiniteIncompleteFallbackLayoutState();
-                _log.Write("Deferred reconnect layout-state evaluation because monitor detection used the Windows Screen fallback.");
-                return;
-            }
-
-            var profile = SelectedLayoutProfileName();
-            var path = SelectedLayoutPath();
-            var profileIdentity = BuildLayoutProfileIdentity(profile, path);
-            var savedIdentities = LayoutIdentityStore.Load(path);
-            var exactSavedSetActive = DisplayTopologyService.IsExactSavedMonitorSetActive(
-                path,
-                _detected,
-                savedIdentities);
-            var arrivalGeneration = _monitorArrivalAfterRemovalGeneration;
-            var hasUnconsumedPhysicalReconnect = ShouldEvaluatePhysicalReconnect(
-                arrivalGeneration,
-                _consumedMonitorArrivalAfterRemovalGeneration);
-
-            if (_pendingReconnectLayoutRestore != null &&
-                (!exactSavedSetActive ||
-                 !string.Equals(
-                     _pendingReconnectLayoutRestore.ProfileIdentity,
-                     profileIdentity,
-                     StringComparison.OrdinalIgnoreCase)))
-            {
-                ClearQueuedReconnectLayoutRestore(
-                    "Cancelled queued reconnect layout restore because the active monitor set or selected profile changed.");
-            }
-
-            var shouldRestore = _reconnectRestoreTracker.Observe(
-                profileIdentity,
-                exactSavedSetActive,
-                allowTrigger);
-            if (shouldRestore)
-            {
-                QueueReconnectLayoutRestore(
-                    profile,
-                    path,
-                    profileIdentity,
-                    hasUnconsumedPhysicalReconnect ? arrivalGeneration : 0);
-                if (hasUnconsumedPhysicalReconnect)
-                    _consumedMonitorArrivalAfterRemovalGeneration = arrivalGeneration;
-            }
-            else if (exactSavedSetActive &&
-                     hasUnconsumedPhysicalReconnect)
-            {
-                var applied = _topologySvc.CheckSavedLayoutApplied(
-                    path,
-                    _detected,
-                    savedIdentities);
-                if (applied.State == SavedLayoutAppliedState.NotApplied)
-                {
-                    QueueReconnectLayoutRestore(
-                        profile,
-                        path,
-                        profileIdentity,
-                        arrivalGeneration);
-                    _log.Write(
-                        $"Queued safe reconnect restore for profile '{profile}' after a physical monitor removal/arrival cycle because its saved geometry was not applied.");
-                }
-                else
-                {
-                    _log.Write(
-                        applied.State == SavedLayoutAppliedState.Applied
-                            ? $"Consumed physical reconnect evidence for profile '{profile}' because its saved geometry was already applied."
-                            : $"Skipped physical reconnect layout restore for profile '{profile}' because saved geometry verification was inconclusive: {applied.Message}");
-                }
-
-                // Do not let stale physical-event evidence turn a later manual
-                // rearrangement into an automatic restore. An inconclusive check
-                // is consumed safely without changing the topology.
-                _consumedMonitorArrivalAfterRemovalGeneration = arrivalGeneration;
-            }
-            else if (hasUnconsumedPhysicalReconnect && !exactSavedSetActive)
-            {
-                // This arrival does not describe the selected profile's complete,
-                // exact monitor set. Consume it so unrelated later layout changes
-                // cannot reuse stale hardware evidence.
-                _consumedMonitorArrivalAfterRemovalGeneration = arrivalGeneration;
-                _log.Write(
-                    $"Consumed physical reconnect evidence because the active monitor set did not exactly match profile '{profile}'.");
-            }
-            else if (allowTrigger &&
-                     exactSavedSetActive &&
-                     _pendingReconnectLayoutRestore != null)
-            {
-                RestartReconnectLayoutRestoreTimer();
-            }
+            _ = allowTrigger;
+            _ = detectionIsReliable;
+            _reconnectRestoreTracker.Reset();
+            _consumedMonitorArrivalAfterRemovalGeneration = _monitorArrivalAfterRemovalGeneration;
+            ClearQueuedReconnectLayoutRestore(
+                "Cancelled queued reconnect geometry restore because Windows Display Settings now owns monitor arrangement.");
         }
 
         internal static bool ShouldEvaluatePhysicalReconnect(
@@ -1305,63 +1218,10 @@ namespace WorkMonitorSwitcher
                         }
                     }
 
-                    var result = await ApplySavedLayoutTopologyWithRetryAsync(
-                        currentProfile,
-                        currentPath,
-                        requireReliableDetection: true);
-                    if (!result.Success)
-                    {
-                        if (result.RollbackAttempted && !result.RollbackVerified)
-                        {
-                            ClearReconnectLayoutRestoreRequest(request);
-                            _log.Write(
-                                $"Reconnect layout restore for profile '{currentProfile}' stopped because rollback could not be verified. " +
-                                "No automatic retry will run until a new display event is observed.");
-                            return;
-                        }
-
-                        const int maxTopologyAttempts = 3;
-                        if (request.TopologyAttempt < maxTopologyAttempts &&
-                            IsReconnectRestoreRequestCurrent(request))
-                        {
-                            var retryRequest = request with
-                            {
-                                TopologyAttempt = request.TopologyAttempt + 1
-                            };
-                            _pendingReconnectLayoutRestore = retryRequest;
-                            RestartReconnectLayoutRestoreTimer();
-                            _log.Write(
-                                $"Reconnect layout restore for profile '{currentProfile}' failed transiently; " +
-                                $"queued safe CCD retry {retryRequest.TopologyAttempt} of {maxTopologyAttempts} without running the active-set-changing fallback.");
-                        }
-                        else
-                        {
-                            ClearReconnectLayoutRestoreRequest(request);
-                            _log.Write(
-                                $"Reconnect layout restore for profile '{currentProfile}' failed after {request.TopologyAttempt} safe CCD attempt(s) without running the active-set-changing fallback.");
-                        }
-                        return;
-                    }
-
+                    ClearReconnectLayoutRestoreRequest(request);
                     _log.Write(
-                        $"Auto-restored identity-matched layout profile '{currentProfile}' after the saved monitors physically reconnected.");
-                    _pendingReconnectLayoutRestore = null;
-                    await RefreshMonitorsAndUiAsync(allowDuringDisplayAction: true);
-                    _lifetimeCancellation.Token.ThrowIfCancellationRequested();
-                    var primaryResult = await EnforcePreferredPrimaryIfActiveAsync(
-                        "preferred primary after reconnect restore");
-                    if (HasUnverifiedRollback(primaryResult))
-                    {
-                        SurfaceUnverifiedTopology(
-                            primaryResult!,
-                            "Automatic reconnect restore");
-                        return;
-                    }
-                    if (primaryResult?.Success == true)
-                    {
-                        await Task.Delay(400, _lifetimeCancellation.Token);
-                        await RefreshMonitorsAndUiAsync(allowDuringDisplayAction: true);
-                    }
+                        $"Skipped legacy reconnect geometry restore for profile '{currentProfile}'; " +
+                        "Windows Display Settings owns monitor position, orientation and primary selection.");
                 }
                 finally
                 {
@@ -1830,9 +1690,9 @@ namespace WorkMonitorSwitcher
                         if (showMessage)
                         {
                             ThemedMessageBox.Warn(this,
-                                "Layout profiles are in an unresolved recovery state and cannot be restored safely. " +
+                                "Layout profiles are in an unresolved recovery state and cannot be applied safely. " +
                                 "See diagnostics.log for details; no display changes were made.",
-                                "Restore Layout", _uiSettings.DarkMode);
+                                "Apply Monitor Profile", _uiSettings.DarkMode);
                         }
                         return;
                     }
@@ -1845,119 +1705,93 @@ namespace WorkMonitorSwitcher
                 {
                     if (showMessage)
                         ThemedMessageBox.Warn(this,
-                            $"Unable to restore layout profile '{profile}'. Save it first.",
-                            "Restore Layout", _uiSettings.DarkMode);
+                            $"Unable to apply monitor profile '{profile}'. Save it first.",
+                            "Apply Monitor Profile", _uiSettings.DarkMode);
                     return;
                 }
 
                 CancelQueuedStartupLayoutRestore("restore layout");
                 CancelQueuedReconnectLayoutRestore("restore layout");
 
-                var result = await ApplySavedLayoutTopologyWithRetryAsync(
-                    profile,
-                    path,
-                    requireReliableDetection: isStartupRestore);
-                if (!result.Success &&
-                    !isStartupRestore &&
-                    !(result.RollbackAttempted && !result.RollbackVerified))
+                var savedIdentities = LayoutIdentityStore.Load(path);
+                var detection = await _detectSvc.DetectWithStatusAsync(_lifetimeCancellation.Token);
+                _lifetimeCancellation.Token.ThrowIfCancellationRequested();
+                DisplayTopologyResult result;
+                if (detection.UsedScreenFallback)
                 {
-                    var savedIdentities = LayoutIdentityStore.Load(path);
-                    var detection = await _detectSvc.DetectWithStatusAsync(_lifetimeCancellation.Token);
-                    _lifetimeCancellation.Token.ThrowIfCancellationRequested();
-                    if (detection.UsedScreenFallback)
+                    result = new DisplayTopologyResult
                     {
-                        result = new DisplayTopologyResult
-                        {
-                            Success = false,
-                            Message = "Reliable physical monitor detection was unavailable; the active display set was not changed."
-                        };
+                        Success = false,
+                        Message = "Reliable physical monitor detection was unavailable; the active display set was not changed."
+                    };
+                }
+                else if (DisplayTopologyService.IsExactSavedMonitorSetActive(
+                             path,
+                             detection.Monitors,
+                             savedIdentities))
+                {
+                    result = new DisplayTopologyResult
+                    {
+                        Success = true,
+                        Message = "The requested monitor set is already active; Windows' arrangement was left unchanged."
+                    };
+                }
+                else
+                {
+                    int savedActiveCount = DisplayTopologyService.GetSavedActiveMonitorCount(path);
+                    int currentActiveCount = detection.Monitors.Count(monitor => monitor.IsPresent && monitor.IsActive);
+                    if (showMessage && ShouldConfirmExactSetRestore(_uiSettings.ConfirmBeforeDisable))
+                    {
+                        var exactSetMessage =
+                            $"Applying profile '{profile}' will enable its saved monitors and disable active monitors that are not in it. " +
+                            "Windows Display Settings will remain responsible for their position, orientation and primary display. Continue?";
+                        var choice = MessageBox.Show(
+                            this,
+                            exactSetMessage,
+                            displayActionAlreadyHeld ? "Apply Layout Profile" : "Apply Monitor Profile",
+                            MessageBoxButtons.YesNo,
+                            MessageBoxIcon.Warning);
+                        if (choice != DialogResult.Yes)
+                            return;
                     }
                     else
                     {
-                        int savedActiveCount = DisplayTopologyService.GetSavedActiveMonitorCount(path);
-                        int currentActiveCount = detection.Monitors.Count(monitor => monitor.IsPresent && monitor.IsActive);
-                        if (ShouldConfirmExactSetRestore(_uiSettings.ConfirmBeforeDisable))
-                        {
-                            var exactSetMessage =
-                                $"Layout profile '{profile}' saves {savedActiveCount} active display(s); " +
-                                $"Windows currently has {currentActiveCount} active. " +
-                                "Applying it may enable displays saved in the profile and disable currently active displays that are not in it. Continue?";
-                            var choice = MessageBox.Show(
-                                this,
-                                exactSetMessage,
-                                displayActionAlreadyHeld ? "Apply Layout Profile" : "Restore Monitor Set",
-                                MessageBoxButtons.YesNo,
-                                MessageBoxIcon.Warning);
-                            if (choice != DialogResult.Yes)
-                                return;
-                        }
-                        else
-                        {
-                            _log.Write(
-                                $"Applying exact display set for profile '{profile}' without confirmation because " +
-                                $"Confirm before disabling is off (saved active={savedActiveCount}, current active={currentActiveCount}).");
-                        }
-
-                        _lifetimeCancellation.Token.ThrowIfCancellationRequested();
-                        var exactResult = _layoutSvc.RestoreLayoutWithResult(
-                            path,
-                            detection.Monitors,
-                            savedIdentities);
-                        LogTopologyResult($"native exact-set restore for profile '{profile}'", exactResult);
-                        _log.Write(exactResult.Success
-                            ? $"Native exact-set restore applied for layout profile '{profile}' from {path}."
-                            : $"Native exact-set restore failed for layout profile '{profile}' from {path}.");
-
-                        if (exactResult.Success)
-                        {
-                            await Task.Delay(800, _lifetimeCancellation.Token);
-                            result = await ApplySavedLayoutTopologyWithRetryAsync(profile, path);
-                        }
-                        else
-                        {
-                            result = exactResult;
-                        }
+                        _log.Write(
+                            isStartupRestore
+                                ? $"Applying monitor set for profile '{profile}' from the enabled startup-profile setting " +
+                                  $"(saved active={savedActiveCount}, current active={currentActiveCount})."
+                                : $"Applying monitor set for profile '{profile}' without confirmation because " +
+                                  $"Confirm before disabling is off (saved active={savedActiveCount}, current active={currentActiveCount}).");
                     }
-                }
-                else if (!result.Success)
-                {
-                    _log.Write(
-                        $"Startup restore for layout profile '{profile}' did not change the active display set. " +
-                        "Use Restore manually if monitors must be enabled or disabled.");
+
+                    _lifetimeCancellation.Token.ThrowIfCancellationRequested();
+                    result = _layoutSvc.RestoreLayoutWithResult(
+                        path,
+                        detection.Monitors,
+                        savedIdentities);
+                    LogTopologyResult($"native monitor-set apply for profile '{profile}'", result);
                 }
 
                 if (!result.Success)
                 {
                     if (showMessage)
                         ThemedMessageBox.Warn(this,
-                            $"Unable to restore layout profile '{profile}'. {result.Message}",
-                            "Restore Layout", _uiSettings.DarkMode);
+                            $"Unable to apply monitor profile '{profile}'. {result.Message}",
+                            "Apply Monitor Profile", _uiSettings.DarkMode);
                     return;
                 }
 
                 await RefreshMonitorsAndUiAsync(allowDuringDisplayAction: true);
                 _lifetimeCancellation.Token.ThrowIfCancellationRequested();
-                var primaryResult = await EnforcePreferredPrimaryIfActiveAsync(
-                    "preferred primary after layout restore");
-                if (HasUnverifiedRollback(primaryResult))
-                {
-                    SurfaceUnverifiedTopology(primaryResult!, "Restore Layout");
-                    return;
-                }
-                if (primaryResult?.Success == true)
-                {
-                    await Task.Delay(400, _lifetimeCancellation.Token);
-                    await RefreshMonitorsAndUiAsync(allowDuringDisplayAction: true);
-                }
 
                 if (showMessage)
                 {
                     ThemedMessageBox.Info(
                         this,
                         displayActionAlreadyHeld
-                            ? $"Layout profile '{profile}' applied."
-                            : $"Layout profile '{profile}' restored.",
-                        displayActionAlreadyHeld ? "Apply Layout Profile" : "Restore Layout",
+                            ? $"Profile '{profile}' applied. Windows' monitor arrangement was left unchanged."
+                            : $"Profile '{profile}' applied. Windows' monitor arrangement was left unchanged.",
+                        "Apply Monitor Profile",
                         _uiSettings.DarkMode);
                 }
             }
@@ -1970,56 +1804,6 @@ namespace WorkMonitorSwitcher
                 if (!displayActionAlreadyHeld)
                     EndDisplayAction("restore layout");
             }
-        }
-
-        private async Task<DisplayTopologyResult> ApplySavedLayoutTopologyWithRetryAsync(
-            string profile,
-            string path,
-            bool requireReliableDetection = false)
-        {
-            DisplayTopologyResult? result = null;
-            var savedIdentities = LayoutIdentityStore.Load(path);
-            if (savedIdentities.Count > 0)
-                _log.Write($"Loaded {savedIdentities.Count} saved monitor identity record(s) for layout profile '{profile}'.");
-
-            for (int attempt = 0; attempt < 5; attempt++)
-            {
-                var detection = await _detectSvc.DetectWithStatusAsync(_lifetimeCancellation.Token);
-                _lifetimeCancellation.Token.ThrowIfCancellationRequested();
-                if (requireReliableDetection && detection.UsedScreenFallback)
-                {
-                    result = new DisplayTopologyResult
-                    {
-                        Success = false,
-                        Message = "Reliable monitor identity detection was unavailable for the automatic layout restore."
-                    };
-                }
-                else
-                {
-                    result = _topologySvc.ApplyLayoutPositionsFromConfig(
-                        path,
-                        detection.Monitors,
-                        savedIdentities);
-                }
-                if (result.Success)
-                    break;
-                if (result.RollbackAttempted && !result.RollbackVerified)
-                    break;
-
-                await Task.Delay(500, _lifetimeCancellation.Token);
-            }
-
-            result ??= new DisplayTopologyResult
-            {
-                Success = false,
-                Message = "Saved layout topology was not attempted."
-            };
-
-            LogTopologyResult($"CCD layout restore for profile '{profile}'", result);
-            if (result.Success)
-                await Task.Delay(400, _lifetimeCancellation.Token);
-
-            return result;
         }
 
         private void LogTopologyResult(string action, DisplayTopologyResult result)
@@ -2181,7 +1965,7 @@ namespace WorkMonitorSwitcher
                     {
                         if (restoreButton != null)
                         {
-                            restoreButton.Text = restoreButtonText ?? "Restore";
+                            restoreButton.Text = restoreButtonText ?? "Apply";
                             restoreButton.Enabled = true;
                         }
                     }
@@ -2342,21 +2126,6 @@ namespace WorkMonitorSwitcher
                 previousLayoutProfile,
                 SelectedLayoutProfileName(),
                 StringComparison.OrdinalIgnoreCase);
-            DisplayTopologyResult? primaryResult = null;
-            var preferredPrimary = PrimaryMonitorPreference.ResolvePreferredPrimaryTarget(_detected, _aliasMap);
-            if (!selectedLayoutProfileChanged && !string.IsNullOrWhiteSpace(preferredPrimary))
-                primaryResult = await EnforcePreferredPrimaryIfActiveAsync("preferred primary after settings save");
-            if (!selectedLayoutProfileChanged &&
-                !string.IsNullOrWhiteSpace(preferredPrimary) &&
-                primaryResult?.Success != true)
-            {
-                warnings.Add(primaryResult?.Message ?? "The preferred primary monitor could not be applied.");
-            }
-            else if (primaryResult?.Success == true)
-            {
-                await Task.Delay(400, _lifetimeCancellation.Token);
-                await RefreshMonitorsAndUiAsync(allowDuringDisplayAction: true);
-            }
 
             if (warnings.Count > 0)
             {
@@ -3516,63 +3285,9 @@ namespace WorkMonitorSwitcher
         {
             await RefreshMonitorsAndUiAsync(allowDuringDisplayAction: true);
             _lifetimeCancellation.Token.ThrowIfCancellationRequested();
-            bool restoredLayout = false;
-            var profile = SelectedLayoutProfileName();
-            var path = SelectedLayoutPath();
-            var savedIdentities = LayoutIdentityStore.Load(path);
-            bool exactSavedSetActive = !_displayedDetectionUsedScreenFallback &&
-                                       File.Exists(path) &&
-                                       DisplayTopologyService.IsExactSavedMonitorSetActive(
-                                           path,
-                                           _detected,
-                                           savedIdentities);
-            if (exactSavedSetActive)
-            {
-                var result = await ApplySavedLayoutTopologyWithRetryAsync(
-                    profile,
-                    path,
-                    requireReliableDetection: true);
-                if (result.Success)
-                {
-                    _log.Write($"Auto-restored exact identity-matched layout profile '{profile}' after enable.");
-                    restoredLayout = true;
-                }
-                else
-                {
-                    _log.Write(
-                        result.RollbackAttempted && !result.RollbackVerified
-                            ? $"Auto-restore for layout profile '{profile}' failed and rollback could not be verified. No further topology action will run."
-                            : $"Auto-restore for layout profile '{profile}' failed; any attempted change was rolled back safely.");
-                }
-
-                await RefreshMonitorsAndUiAsync(allowDuringDisplayAction: true);
-                _lifetimeCancellation.Token.ThrowIfCancellationRequested();
-                if (result.RollbackAttempted && !result.RollbackVerified)
-                {
-                    ThemedMessageBox.Warn(this,
-                        result.Message,
-                        "Monitor Switcher", _uiSettings.DarkMode);
-                    return;
-                }
-            }
-            else
-            {
-                _log.Write(
-                    $"Auto-restore skipped after enable because the current active monitor set did not exactly match saved profile '{profile}' or detection was inconclusive.");
-            }
-
-            var primaryResult = await EnforcePrimaryMonitorOrderAsync(
-                allowAutomaticFallback: !restoredLayout);
-            if (HasUnverifiedRollback(primaryResult))
-            {
-                SurfaceUnverifiedTopology(primaryResult!, "Monitor Switcher");
-                return;
-            }
-            if (primaryResult?.Success == true)
-            {
-                await Task.Delay(400, _lifetimeCancellation.Token);
-                await RefreshMonitorsAndUiAsync(allowDuringDisplayAction: true);
-            }
+            _log.Write(
+                "Enable completed without applying profile geometry or preferred-primary settings; " +
+                "Windows Display Settings remains authoritative for arrangement.");
         }
 
         private async Task<MonitorActivityVerification> WaitForEnableDetectionAsync(
@@ -3703,60 +3418,6 @@ namespace WorkMonitorSwitcher
                 Themer.ApplyButtonStyle(ctrls.EnableButton, palette);
             }
         }
-
-
-        private async Task<DisplayTopologyResult?> EnforcePrimaryMonitorOrderAsync(bool allowAutomaticFallback)
-        {
-            var preferredResult = await EnforcePreferredPrimaryIfActiveAsync("preferred primary");
-            if (preferredResult?.Success == true || HasUnverifiedRollback(preferredResult))
-                return preferredResult;
-
-            if (!allowAutomaticFallback)
-                return preferredResult;
-
-            var target = PrimaryMonitorPreference.ResolveLeftMostActiveTarget(_detected, _aliasMap);
-            if (!string.IsNullOrWhiteSpace(target))
-                return await SetPrimaryWithTopologyAsync(target, "left-most active primary");
-
-            return preferredResult;
-        }
-
-        private async Task<DisplayTopologyResult?> EnforcePreferredPrimaryIfActiveAsync(string reason)
-        {
-            var target = PrimaryMonitorPreference.ResolvePreferredPrimaryTarget(_detected, _aliasMap);
-            if (string.IsNullOrWhiteSpace(target))
-                return null;
-
-            return await SetPrimaryWithTopologyAsync(target, reason);
-        }
-
-        private Task<DisplayTopologyResult> SetPrimaryWithTopologyAsync(string target, string reason)
-        {
-            var targetMatches = _detected
-                .Where(monitor =>
-                    monitor.IsPresent &&
-                    monitor.IsActive &&
-                    MonitorTargetResolver.TargetsEquivalent(monitor.DeviceName, target) &&
-                    NativeDisplayProfileCodec.IsStrongTargetPath(monitor.NativeTargetPath))
-                .ToList();
-            if (_displayedDetectionUsedScreenFallback || targetMatches.Count != 1)
-            {
-                _log.Write(
-                    $"Skipped set primary ({reason}); '{target}' did not resolve to one reliably detected physical display.");
-                return Task.FromResult(new DisplayTopologyResult
-                {
-                    Success = false,
-                    Message =
-                        $"'{target}' did not resolve to one reliably detected physical display; no primary-display change was made."
-                });
-            }
-
-            _lifetimeCancellation.Token.ThrowIfCancellationRequested();
-            var result = _topologySvc.SetPrimaryDisplay(target, targetMatches[0].NativeTargetPath);
-            LogTopologyResult($"CCD set primary ({reason})", result);
-            return Task.FromResult(result);
-        }
-
         private static bool HasUnverifiedRollback(DisplayTopologyResult? result)
             => result?.RollbackAttempted == true && !result.RollbackVerified;
 
