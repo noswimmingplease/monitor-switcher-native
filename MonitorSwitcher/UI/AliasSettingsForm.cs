@@ -139,14 +139,7 @@ namespace WorkMonitorSwitcher
             MinimizeBox = false;
             AutoScaleMode = AutoScaleMode.Dpi;
             ShowIcon = true;
-            try
-            {
-                Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
-            }
-            catch
-            {
-                // Non-fatal: the dialog can still open without a title bar icon.
-            }
+            Icon = AppIcon.Current;
             MinimumSize = new Size(760, 480);
             Size = new Size(900, 540);
             _chkDark.Checked = darkMode;

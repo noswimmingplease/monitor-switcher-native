@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## v0.4.1 - 2026-08-25
+
+### Fixed
+
+- Embedded one canonical application icon and use it consistently for the executable, main window, Settings, profile-name dialog, themed messages and notification area.
+- Added regression coverage that fails when the managed icon resource is missing or unreadable.
+
 ## v0.4.0 - 2026-08-19
 
 ### Fixed

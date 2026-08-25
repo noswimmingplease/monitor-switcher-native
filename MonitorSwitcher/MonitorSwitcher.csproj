@@ -19,6 +19,8 @@
 
 	<ItemGroup>
 	  <None Remove="MonitorSwitcher_transparent.ico" />
+	  <EmbeddedResource Include="MonitorSwitcher_transparent.ico"
+	                    LogicalName="WorkMonitorSwitcher.MonitorSwitcher.ico" />
 	</ItemGroup>
 
 	<ItemGroup>
