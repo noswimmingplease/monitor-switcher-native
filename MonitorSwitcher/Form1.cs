@@ -205,6 +205,8 @@ namespace WorkMonitorSwitcher
             InitializeComponent();
 
             Text = "Monitor Switcher";
+            ShowIcon = true;
+            Icon = AppIcon.Current;
             AutoScaleMode = AutoScaleMode.Dpi;
             AutoScaleDimensions = new SizeF(96F, 96F);
             AutoSize = false;
@@ -935,21 +937,11 @@ namespace WorkMonitorSwitcher
                 Close();
             });
 
-            Icon trayIcon;
-            try
-            {
-                trayIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath) ?? SystemIcons.Application;
-            }
-            catch
-            {
-                trayIcon = SystemIcons.Application;
-            }
-
             _trayIcon = new NotifyIcon
             {
                 Text = "Monitor Switcher",
                 ContextMenuStrip = _trayMenu,
-                Icon = trayIcon,
+                Icon = AppIcon.Current,
                 Visible = true
             };
 
@@ -2024,6 +2016,8 @@ namespace WorkMonitorSwitcher
                 MinimizeBox = false,
                 MaximizeBox = false,
                 ShowInTaskbar = false,
+                ShowIcon = true,
+                Icon = AppIcon.Current,
                 ClientSize = new Size(360, 126)
             };
 

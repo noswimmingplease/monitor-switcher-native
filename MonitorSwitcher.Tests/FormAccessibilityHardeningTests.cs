@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using WorkMonitorSwitcher;
+using WorkMonitorSwitcher.UI;
 
 internal static class FormAccessibilityHardeningTests
 {
@@ -11,6 +12,7 @@ internal static class FormAccessibilityHardeningTests
         yield return ("Profile restore fails closed during topology quarantine", ProfileRestoreFailsClosedDuringTopologyQuarantine);
         yield return ("Profile membership preview describes every set change", ProfilePreviewDescribesSetChanges);
         yield return ("Profile selection status uses concise action wording", ProfileSelectionStatusUsesConciseActionWording);
+        yield return ("Application icon resource is bundled and readable", ApplicationIconIsBundled);
     }
 
     private static void ScaleLogicalMetrics()
@@ -72,6 +74,16 @@ internal static class FormAccessibilityHardeningTests
                 exactSetActive: false,
                 applyEnabled: false,
                 unavailableReason: "Profile unavailable"));
+    }
+
+    private static void ApplicationIconIsBundled()
+    {
+        if (!AppIcon.HasBundledResource)
+            throw new InvalidOperationException("The application icon is not embedded in the application assembly.");
+
+        var icon = AppIcon.Current;
+        if (icon.Width < 16 || icon.Height < 16)
+            throw new InvalidOperationException($"The bundled application icon is unexpectedly small: {icon.Width}x{icon.Height}.");
     }
 
     private static void AssertEqual(int expected, int actual)

@@ -52,6 +52,8 @@ namespace WorkMonitorSwitcher.UI
                 MaximizeBox = false,
                 MinimizeBox = false,
                 ShowInTaskbar = false,
+                ShowIcon = true,
+                Icon = AppIcon.Current,
                 AutoScaleMode = AutoScaleMode.Dpi,
                 Font = SystemFonts.MessageBoxFont,
                 ClientSize = new Size(clientWidth, clientHeight)

@@ -13,7 +13,7 @@ Source repository: https://github.com/Ci303/monitor-switcher-native
 Download the self-contained Windows x64 ZIP and its `.sha256` file from the [latest release](https://github.com/Ci303/monitor-switcher-native/releases/latest). Verify the archive before extracting it:
 
 ```powershell
-$zip = '.\MonitorSwitcher-v0.4.0-win-x64.zip'
+$zip = '.\MonitorSwitcher-v0.4.1-win-x64.zip'
 $expected = ((Get-Content -LiteralPath "$zip.sha256" -Raw).Trim() -split '\s+')[0]
 $actual = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($actual -ne $expected) { throw 'The downloaded ZIP does not match its published checksum.' }
