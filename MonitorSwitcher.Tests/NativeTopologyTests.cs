@@ -15,6 +15,57 @@ internal static class NativeTopologyTests
         yield return ("Native topology flags separate database lookup from persistent best mode", NativeFlagsAreCorrect);
         yield return ("Native topology mutation rejects stale display-name bindings", StaleDetectionBindingFailsClosed);
         yield return ("Monitor profiles reduce to physical membership regardless of saved geometry", ProfileApplicationIgnoresGeometry);
+        yield return ("Activation correction restores three-pixel drift and portrait flipped", CorrectionRestoresGeometry);
+        yield return ("Activation correction rebases after primary removal", CorrectionRebasesPrimary);
+        yield return ("Activation correction preserves newly enabled geometry", CorrectionPreservesNewDisplay);
+        yield return ("Activation correction rejects duplicate target identities", CorrectionRejectsDuplicates);
+    }
+
+    private static ActiveDisplayGeometry Geometry(string id, int x, int y, bool primary = false)
+        => new(Target(id), id, x, y, 1440, 2560, 4, primary);
+
+    private static void CorrectionRestoresGeometry()
+    {
+        var original = new[] { Geometry("A", -2560, 0), Geometry("B", 0, 0, true), Geometry("C", 2560, -1133) };
+        var actual = new[] { original[1], original[2] with { Y = -1130, Rotation = 1, Width = 2560, Height = 1440 } };
+        var corrected = DisplayTopologyService.PlanRetainedGeometryCorrection(original, actual).Values.ToList();
+        AssertTrue(DisplayTopologyService.TryVerifyRetainedDisplayGeometry(original, corrected,
+            actual.Select(entry => entry.TargetPath).ToList(), out _), "Must correct position, dimensions and portrait-flipped rotation.");
+        AssertTrue(corrected.Single(entry => entry.DeviceName == "C").Y == -1133, "Must restore the exact offset, not widen tolerance.");
+        var largeDrift = new[] { original[1], original[2] with { X = 22000, Y = 17000 } };
+        var largeCorrection = DisplayTopologyService.PlanRetainedGeometryCorrection(original, largeDrift).Values.ToList();
+        AssertTrue(DisplayTopologyService.TryVerifyRetainedDisplayGeometry(original, largeCorrection,
+            largeDrift.Select(entry => entry.TargetPath).ToList(), out _), "Correction must not be limited to a small pixel tolerance.");
+    }
+
+    private static void CorrectionRebasesPrimary()
+    {
+        var original = new[] { Geometry("A", 0, 0, true), Geometry("B", 2560, -1133), Geometry("C", 4000, -1133) };
+        var actual = new[] { original[1] with { X = 0, Y = 0, IsPrimary = true }, original[2] with { X = 1440, Y = 3 } };
+        var corrected = DisplayTopologyService.PlanRetainedGeometryCorrection(original, actual).Values.ToList();
+        AssertTrue(DisplayTopologyService.TryVerifyRetainedDisplayGeometry(original, corrected,
+            actual.Select(entry => entry.TargetPath).ToList(), out _), "Removing the primary must preserve relative geometry and rotation.");
+        var single = DisplayTopologyService.PlanRetainedGeometryCorrection(original, actual.Take(1).ToList()).Values.Single();
+        AssertTrue(single.IsPrimary && single.X == 0 && single.Y == 0 && single.Rotation == 4, "Single remaining display must retain portrait flipped.");
+    }
+
+    private static void CorrectionPreservesNewDisplay()
+    {
+        var original = new[] { Geometry("A", 0, 0, true), Geometry("B", 1440, 0) };
+        var actual = new[] { original[0], original[1] with { Y = 3 }, Geometry("C", -1920, 0) };
+        var corrected = DisplayTopologyService.PlanRetainedGeometryCorrection(original, actual).Values.ToList();
+        AssertTrue(corrected.Single(entry => entry.DeviceName == "C") == actual[2], "New displays must retain Windows geometry, not profile geometry.");
+        var again = DisplayTopologyService.PlanRetainedGeometryCorrection(corrected, corrected).Values.ToList();
+        AssertTrue(corrected.SequenceEqual(again), "Repeated correction must not accumulate offsets.");
+    }
+
+    private static void CorrectionRejectsDuplicates()
+    {
+        var entry = Geometry("A", 0, 0, true);
+        bool rejected = false;
+        try { DisplayTopologyService.PlanRetainedGeometryCorrection(new[] { entry }, new[] { entry, entry }); }
+        catch (ArgumentException) { rejected = true; }
+        AssertTrue(rejected, "Duplicate targets must not be guessed.");
     }
 
     private static void ProfileApplicationIgnoresGeometry()

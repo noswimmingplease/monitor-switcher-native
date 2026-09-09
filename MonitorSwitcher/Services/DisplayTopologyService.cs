@@ -85,6 +85,7 @@ namespace WorkMonitorSwitcher.Services
         private const uint DisplayConfigPathModeIndexInvalid = 0xffffffff;
         private const int PositionNormalisationTolerancePixels = 1;
         private const int PostApplyVerificationAttempts = 3;
+        private const int ActivationVerificationAttempts = 6;
 
         internal static uint GetPersistentApplyFlags()
             => SdcUseSuppliedDisplayConfig |
@@ -265,7 +266,8 @@ namespace WorkMonitorSwitcher.Services
                     Success = true,
                     ValidateCode = activation.ValidateCode,
                     ApplyCode = activation.ApplyCode,
-                    Message = $"Enabled native display '{selectedPath.TargetFriendlyName}' using a Windows-managed arrangement."
+                    Message = $"Enabled native display '{selectedPath.TargetFriendlyName}' using a Windows-managed arrangement.",
+                    Details = activation.Details
                 };
             }
             catch (Exception ex)
@@ -374,7 +376,8 @@ namespace WorkMonitorSwitcher.Services
                     Success = true,
                     ValidateCode = activation.ValidateCode,
                     ApplyCode = activation.ApplyCode,
-                    Message = $"Applied monitor set '{Path.GetFileName(layoutPath)}' using a Windows-managed arrangement."
+                    Message = $"Applied monitor set '{Path.GetFileName(layoutPath)}' using a Windows-managed arrangement.",
+                    Details = activation.Details
                 };
             }
             catch (Exception ex)
@@ -568,7 +571,8 @@ namespace WorkMonitorSwitcher.Services
                 .Select(NativeDisplayProfileCodec.NormaliseTargetPath)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
             IReadOnlyList<string> verification = Array.Empty<string>();
-            for (int attempt = 0; attempt < PostApplyVerificationAttempts; attempt++)
+            TopologySnapshot? correctionSnapshot = null;
+            for (int attempt = 0; attempt < ActivationVerificationAttempts; attempt++)
             {
                 try
                 {
@@ -605,14 +609,76 @@ namespace WorkMonitorSwitcher.Services
                             .Concat(expected.Where(path => !actual.Contains(path, StringComparer.OrdinalIgnoreCase))
                                 .Select(path => $"Expected target is inactive: {path}."))
                             .ToList();
+                    correctionSnapshot = exactTargetSet ? active : null;
                 }
                 catch (Exception ex)
                 {
+                    correctionSnapshot = null;
                     verification = new[] { $"Unable to query the activated topology: {ex.Message}" };
                 }
 
-                if (attempt + 1 < PostApplyVerificationAttempts)
-                    System.Threading.Thread.Sleep(100);
+                if (attempt + 1 < ActivationVerificationAttempts)
+                    System.Threading.Thread.Sleep(200);
+            }
+
+            // Database activation may silently move retained displays. Correct
+            // against the pre-switch live capture, never the profile's geometry.
+            if (correctionSnapshot != null)
+            {
+                try
+                {
+                    if (!TryValidateExtendedDesktop(correctionSnapshot.Entries, out var error))
+                        throw new InvalidOperationException(error);
+                    var geometry = PlanRetainedGeometryCorrection(
+                        original.Entries.Select(ToGeometry).ToList(),
+                        correctionSnapshot.Entries.Select(ToGeometry).ToList());
+                    var entries = correctionSnapshot.Entries.OrderBy(entry =>
+                        geometry[NativeDisplayProfileCodec.NormaliseTargetPath(entry.MonitorDevicePath)].IsPrimary ? 0 : 1).ToList();
+                    var positions = entries.ToDictionary(entry => entry.SourceModeIndex, entry =>
+                    {
+                        var desired = geometry[NativeDisplayProfileCodec.NormaliseTargetPath(entry.MonitorDevicePath)];
+                        return new DisplayPosition(desired.X, desired.Y);
+                    });
+                    var sizes = entries.ToDictionary(entry => entry.SourceModeIndex, entry =>
+                    {
+                        var desired = geometry[NativeDisplayProfileCodec.NormaliseTargetPath(entry.MonitorDevicePath)];
+                        return new DisplaySize(desired.Width, desired.Height);
+                    });
+                    var rotations = entries.ToDictionary(entry => entry.SourceModeIndex, entry =>
+                        geometry[NativeDisplayProfileCodec.NormaliseTargetPath(entry.MonitorDevicePath)].Rotation);
+                    var correction = ValidateAndApply(CloneTopologySnapshot(correctionSnapshot), entries,
+                        positions, "Restored the pre-switch arrangement after native activation.", sizes, rotations);
+                    verification = verification.Concat(new[] { correction.Message }).Concat(correction.Details).ToList();
+                    if (correction.Success)
+                    {
+                        var corrected = QueryActiveTopology();
+                        var correctedTargets = corrected.Entries.Select(entry =>
+                            NativeDisplayProfileCodec.NormaliseTargetPath(entry.MonitorDevicePath)).ToList();
+                        bool exactSet = correctedTargets.Count == expected.Count &&
+                            correctedTargets.Distinct(StringComparer.OrdinalIgnoreCase).Count() == expected.Count &&
+                            expected.SetEquals(correctedTargets);
+                        var retainedVerified = TryVerifyRetainedDisplayGeometry(
+                            original.Entries.Select(ToGeometry).ToList(),
+                            corrected.Entries.Select(ToGeometry).ToList(), expected, out var remainingIssues);
+                        if (exactSet && retainedVerified)
+                        {
+                            return new DisplayTopologyResult
+                            {
+                                Success = true,
+                                ValidateCode = validateCode,
+                                ApplyCode = applyCode,
+                                Message = correction.Message,
+                                Details = verification
+                            };
+                        }
+                        verification = verification.Concat(remainingIssues)
+                            .Concat(exactSet ? Array.Empty<string>() : new[] { "Target set changed after arrangement correction." }).ToList();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    verification = verification.Concat(new[] { $"Arrangement correction failed: {ex.Message}" }).ToList();
+                }
             }
 
             return new DisplayTopologyResult
@@ -635,6 +701,39 @@ namespace WorkMonitorSwitcher.Services
                 entry.Height,
                 entry.Rotation,
                 entry.X == 0 && entry.Y == 0);
+
+        internal static IReadOnlyDictionary<string, ActiveDisplayGeometry> PlanRetainedGeometryCorrection(
+            IReadOnlyCollection<ActiveDisplayGeometry> original,
+            IReadOnlyCollection<ActiveDisplayGeometry> actual)
+        {
+            var previous = original.ToDictionary(entry =>
+                NativeDisplayProfileCodec.NormaliseTargetPath(entry.TargetPath), StringComparer.OrdinalIgnoreCase);
+            var observed = actual.ToDictionary(entry =>
+                NativeDisplayProfileCodec.NormaliseTargetPath(entry.TargetPath), StringComparer.OrdinalIgnoreCase);
+            var retained = previous.Where(pair => observed.ContainsKey(pair.Key)).ToList();
+            if (retained.Count == 0 || actual.Count(entry => entry.IsPrimary) != 1)
+                throw new InvalidOperationException("No unambiguous retained arrangement is available for correction.");
+
+            // Keep a surviving primary; otherwise use Windows' new primary.
+            var primary = retained.Where(pair => pair.Value.IsPrimary).Select(pair => pair.Key).SingleOrDefault()
+                ?? observed.Single(pair => pair.Value.IsPrimary).Key;
+            var anchor = retained.FirstOrDefault(pair => pair.Key == primary);
+            if (anchor.Value == null)
+                anchor = retained[0];
+            long offsetX = (long)observed[anchor.Key].X - anchor.Value.X;
+            long offsetY = (long)observed[anchor.Key].Y - anchor.Value.Y;
+            var result = observed.ToDictionary(pair => pair.Key, pair => previous.TryGetValue(pair.Key, out var old)
+                ? pair.Value with { X = checked((int)(old.X + offsetX)), Y = checked((int)(old.Y + offsetY)),
+                    Width = old.Width, Height = old.Height, Rotation = old.Rotation }
+                : pair.Value, StringComparer.OrdinalIgnoreCase);
+            var origin = result[primary];
+            return result.ToDictionary(pair => pair.Key, pair => pair.Value with
+            {
+                X = checked(pair.Value.X - origin.X),
+                Y = checked(pair.Value.Y - origin.Y),
+                IsPrimary = pair.Key == primary
+            }, StringComparer.OrdinalIgnoreCase);
+        }
 
         internal static bool TryVerifyRetainedDisplayGeometry(
             IReadOnlyCollection<ActiveDisplayGeometry> original,
