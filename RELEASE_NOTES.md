@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v0.4.2 - 2026-09-09
+
+### Fixed
+
+- Correct unintended movement of retained monitors after a profile change or Enable action using the live pre-switch arrangement, not old profile coordinates.
+- Allow Windows time to settle before attempting correction; retain strict target, orientation, size and arrangement verification with rollback if correction fails.
+- Added regression coverage for position drift, portrait-flipped orientation, primary removal, newly enabled displays and repeated correction. The profile-switching fix was also tested on a physical three-monitor setup.
+
 ## v0.4.1 - 2026-08-25
 
 ### Fixed
