@@ -540,14 +540,14 @@ internal static class UpdaterTests
                 new
                 {
                     name = assetName,
-                    browser_download_url = $"https://github.com/Ci303/monitor-switcher-native/releases/download/{tag}/{assetName}",
+                    browser_download_url = $"https://github.com/noswimmingplease/monitor-switcher-native/releases/download/{tag}/{assetName}",
                     size = archive.LongLength,
                     digest = $"sha256:{Convert.ToHexString(SHA256.HashData(archive)).ToLowerInvariant()}"
                 },
                 new
                 {
                     name = assetName + ".sha256",
-                    browser_download_url = $"https://github.com/Ci303/monitor-switcher-native/releases/download/{tag}/{assetName}.sha256",
+                    browser_download_url = $"https://github.com/noswimmingplease/monitor-switcher-native/releases/download/{tag}/{assetName}.sha256",
                     size = checksum.LongLength,
                     digest = (string?)null
                 }

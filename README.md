@@ -2,15 +2,15 @@
 
 Open-source Windows Forms utility for switching monitor profiles without a separate helper application.
 
-[![CI](https://github.com/Ci303/monitor-switcher-native/actions/workflows/ci.yml/badge.svg)](https://github.com/Ci303/monitor-switcher-native/actions/workflows/ci.yml)
-[![Latest release](https://img.shields.io/github/v/release/Ci303/monitor-switcher-native?label=release)](https://github.com/Ci303/monitor-switcher-native/releases/latest)
-[![Licence: GPL-3.0](https://img.shields.io/github/license/Ci303/monitor-switcher-native)](LICENSE)
+[![CI](https://github.com/noswimmingplease/monitor-switcher-native/actions/workflows/ci.yml/badge.svg)](https://github.com/noswimmingplease/monitor-switcher-native/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/noswimmingplease/monitor-switcher-native?label=release)](https://github.com/noswimmingplease/monitor-switcher-native/releases/latest)
+[![Licence: GPL-3.0](https://img.shields.io/github/license/noswimmingplease/monitor-switcher-native)](LICENSE)
 
-Source repository: https://github.com/Ci303/monitor-switcher-native
+Source repository: https://github.com/noswimmingplease/monitor-switcher-native
 
 ## Download and Run
 
-Download the self-contained Windows x64 ZIP and its `.sha256` file from the [latest release](https://github.com/Ci303/monitor-switcher-native/releases/latest). Verify the archive before extracting it:
+Download the self-contained Windows x64 ZIP and its `.sha256` file from the [latest release](https://github.com/noswimmingplease/monitor-switcher-native/releases/latest). Verify the archive before extracting it:
 
 ```powershell
 $zip = '.\MonitorSwitcher-v0.4.1-win-x64.zip'

@@ -6,7 +6,7 @@ Security fixes are provided for the latest published release. Older builds may b
 
 ## Reporting a Vulnerability
 
-Use GitHub's [private vulnerability reporting](https://github.com/Ci303/monitor-switcher-native/security/advisories/new) rather than opening a public issue. Include the affected version, impact, reproduction steps and the smallest useful supporting material.
+Use GitHub's [private vulnerability reporting](https://github.com/noswimmingplease/monitor-switcher-native/security/advisories/new) rather than opening a public issue. Include the affected version, impact, reproduction steps and the smallest useful supporting material.
 
 Monitor diagnostics and Windows display identities can contain hardware serial numbers, registry paths and device-instance identifiers. Remove personal or device-specific identifiers before attaching logs or screenshots.
 

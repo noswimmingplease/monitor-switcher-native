@@ -21,7 +21,7 @@ namespace WorkMonitorSwitcher.Services
     internal sealed class AppUpdateService : IDisposable
     {
         internal static readonly Uri LatestReleaseApiUri =
-            new("https://api.github.com/repos/Ci303/monitor-switcher-native/releases/latest");
+            new("https://api.github.com/repos/noswimmingplease/monitor-switcher-native/releases/latest");
 
         internal const long MaxReleaseApiBytes = 2L * 1024 * 1024;
         internal const long MaxChecksumBytes = 16L * 1024;
@@ -448,7 +448,7 @@ namespace WorkMonitorSwitcher.Services
                 return false;
 
             var expectedUri = new Uri(
-                $"https://github.com/Ci303/monitor-switcher-native/releases/download/{releaseTag}/{assetName}");
+                $"https://github.com/noswimmingplease/monitor-switcher-native/releases/download/{releaseTag}/{assetName}");
             return IsExactHttpsUri(uri, expectedUri);
         }
 
