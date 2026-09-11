@@ -2260,25 +2260,25 @@ static void UpdaterReleaseAssetUriIsExact()
     const string asset = "MonitorSwitcher-v0.4.0-win-x64.zip";
     AssertTrue(
         AliasSettingsForm.IsExpectedGitHubReleaseAssetUri(
-            new Uri("https://github.com/Ci303/monitor-switcher-native/releases/download/v0.4.0/MonitorSwitcher-v0.4.0-win-x64.zip"),
+            new Uri("https://github.com/noswimmingplease/monitor-switcher-native/releases/download/v0.4.0/MonitorSwitcher-v0.4.0-win-x64.zip"),
             tag,
             asset),
         "Expected the exact GitHub HTTPS release asset URI to be accepted.");
     AssertFalse(
         AliasSettingsForm.IsExpectedGitHubReleaseAssetUri(
-            new Uri("https://example.com/Ci303/monitor-switcher-native/releases/download/v0.4.0/MonitorSwitcher-v0.4.0-win-x64.zip"),
+            new Uri("https://example.com/noswimmingplease/monitor-switcher-native/releases/download/v0.4.0/MonitorSwitcher-v0.4.0-win-x64.zip"),
             tag,
             asset),
         "Expected a different host to be rejected.");
     AssertFalse(
         AliasSettingsForm.IsExpectedGitHubReleaseAssetUri(
-            new Uri("https://github.com/Ci303/monitor-switcher-native/releases/download/v0.4.0/MonitorSwitcher-v0.4.0-win-x64.zip?redirect=1"),
+            new Uri("https://github.com/noswimmingplease/monitor-switcher-native/releases/download/v0.4.0/MonitorSwitcher-v0.4.0-win-x64.zip?redirect=1"),
             tag,
             asset),
         "Expected a query-bearing release address to be rejected.");
     AssertFalse(
         AliasSettingsForm.IsExpectedGitHubReleaseAssetUri(
-            new Uri("https://github.com/Ci303/monitor-switcher-native/releases/download/v0.4.0/evil.zip"),
+            new Uri("https://github.com/noswimmingplease/monitor-switcher-native/releases/download/v0.4.0/evil.zip"),
             tag,
             "../evil.zip"),
         "Expected an asset name containing traversal to be rejected.");
