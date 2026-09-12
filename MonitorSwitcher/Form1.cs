@@ -53,6 +53,9 @@ namespace WorkMonitorSwitcher
         private string _lastDetectionLogSignature = string.Empty;
         private bool _displayedDetectionUsedScreenFallback;
         private string _displayedDetectionWarning = string.Empty;
+        private string? _lastAppliedProfile;
+        private bool _nativeProfileApplyInProgress;
+        private bool _closeAfterNativeProfileApply;
         private readonly ReconnectLayoutRestoreTracker _reconnectRestoreTracker = new();
         private ReconnectLayoutRestoreRequest? _pendingReconnectLayoutRestore;
         private long _reconnectDisplayEventGeneration;
@@ -394,6 +397,14 @@ namespace WorkMonitorSwitcher
                 {
                     e.Cancel = true;
                     HideToTray();
+                    return;
+                }
+
+                if (_nativeProfileApplyInProgress && e.CloseReason == CloseReason.UserClosing)
+                {
+                    e.Cancel = true;
+                    _closeAfterNativeProfileApply = true;
+                    _log.Write("Exit deferred until native profile verification and rollback have completed.");
                     return;
                 }
 
@@ -1228,6 +1239,7 @@ namespace WorkMonitorSwitcher
                 return true;
 
             var previous = _uiSettings.SelectedLayoutProfile;
+            _lastAppliedProfile = null;
             _uiSettings.SelectedLayoutProfile = normalised;
             var saveResult = _uiStore.SaveWithResult(_uiSettings);
             LogPersistenceResult($"select monitor profile '{normalised}'", saveResult);
@@ -1287,11 +1299,15 @@ namespace WorkMonitorSwitcher
 
             var palette = _uiSettings.DarkMode ? ThemePalette.Dark() : ThemePalette.Light();
             Themer.ApplyButtonStyle(_btnRestoreLayout, palette);
+            if (!exactSetActive)
+                _lastAppliedProfile = null;
             var preview = BuildProfileMembershipPreview(path, profilePairValid, exactSetActive);
             var profileStatus = FormatProfileSelectionStatus(
                 exactSetActive,
                 _btnRestoreLayout.Enabled,
-                preview);
+                preview,
+                string.Equals(_lastAppliedProfile, SelectedLayoutProfileName(), StringComparison.OrdinalIgnoreCase)
+                    ? _lastAppliedProfile : null);
             if (_profilePreviewLabel != null)
             {
                 _profilePreviewLabel.Text = profileStatus;
@@ -1337,10 +1353,11 @@ namespace WorkMonitorSwitcher
         internal static string FormatProfileSelectionStatus(
             bool exactSetActive,
             bool applyEnabled,
-            string unavailableReason)
+            string unavailableReason,
+            string? appliedProfile = null)
         {
             if (exactSetActive)
-                return "Current profile";
+                return appliedProfile == null ? "Current profile" : $"Profile '{appliedProfile}' applied.";
             return applyEnabled
                 ? "Click Apply to use this profile"
                 : unavailableReason;
@@ -2189,10 +2206,20 @@ namespace WorkMonitorSwitcher
                     }
 
                     _lifetimeCancellation.Token.ThrowIfCancellationRequested();
-                    result = _layoutSvc.RestoreLayoutWithResult(
-                        path,
-                        detection.Monitors,
-                        savedIdentities);
+                    _nativeProfileApplyInProgress = true;
+                    try
+                    {
+                        // Do not cancel an in-flight native transaction: verification
+                        // and any rollback must finish before releasing the action gate.
+                        result = await Task.Run(() => _layoutSvc.RestoreLayoutWithResult(
+                            path,
+                            detection.Monitors,
+                            savedIdentities));
+                    }
+                    finally
+                    {
+                        _nativeProfileApplyInProgress = false;
+                    }
                 }
 
                 if (!await HandleTopologyResultAsync(
@@ -2217,11 +2244,8 @@ namespace WorkMonitorSwitcher
 
                 if (showMessage)
                 {
-                    ThemedMessageBox.Info(
-                        this,
-                        $"Profile '{profile}' applied.",
-                        "Apply Monitor Profile",
-                        _uiSettings.DarkMode);
+                    _lastAppliedProfile = profile;
+                    UpdateProfileApplyButtonState();
                 }
             }
             catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
@@ -2232,6 +2256,11 @@ namespace WorkMonitorSwitcher
             {
                 if (!displayActionAlreadyHeld)
                     EndDisplayAction("restore layout");
+                if (_closeAfterNativeProfileApply && !IsDisposed)
+                {
+                    _closeAfterNativeProfileApply = false;
+                    BeginInvoke(new Action(Close));
+                }
             }
         }
 
@@ -2770,6 +2799,11 @@ namespace WorkMonitorSwitcher
             catch (Exception ex)
             {
                 _log.Write($"Monitor refresh failed: {ex.Message}");
+                _displayedDetectionUsedScreenFallback = true;
+                _displayedDetectionWarning = "Monitor detection failed; Refresh to retry.";
+                _lastAppliedProfile = null;
+                if (!IsDisposed && !_lifetimeCancellation.IsCancellationRequested)
+                    UpdateButtonStatus();
                 if (_summaryLabel != null && !IsDisposed)
                 {
                     _summaryLabel.Text = "Detection failed · Refresh to retry";

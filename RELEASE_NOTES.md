@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v0.4.3 - 2026-09-12
+
+### Fixed
+
+- Keep the window responsive while applying native monitor profiles, retaining the action lock until verification and any rollback finish. Explicit exit during native application is deferred until completion.
+- Show successful profile application inline instead of a modal dialogue that keeps the profile selector locked until dismissed.
+- Invalidate stale monitor detection after refresh failures and disable detection-dependent actions until a reliable refresh succeeds.
+
 ## v0.4.2 - 2026-09-09
 
 ### Fixed
