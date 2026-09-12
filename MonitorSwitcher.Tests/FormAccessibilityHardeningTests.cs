@@ -13,6 +13,27 @@ internal static class FormAccessibilityHardeningTests
         yield return ("Profile membership preview describes every set change", ProfilePreviewDescribesSetChanges);
         yield return ("Profile selection status uses concise action wording", ProfileSelectionStatusUsesConciseActionWording);
         yield return ("Application icon resource is bundled and readable", ApplicationIconIsBundled);
+        yield return ("Profile completion status cannot mask changed or unreliable detection", ProfileCompletionStatus);
+        yield return ("Profile Apply recovers after busy and unreliable states", ProfileApplyStateRecovery);
+    }
+
+    private static void ProfileCompletionStatus()
+    {
+        AssertEqual("Profile 'Work' applied.", Form1.FormatProfileSelectionStatus(true, false, "unused", "Work"));
+        AssertEqual("Click Apply to use this profile", Form1.FormatProfileSelectionStatus(false, true, "unused", "Work"));
+        AssertEqual("Detection failed", Form1.FormatProfileSelectionStatus(false, false, "Detection failed", "Work"));
+    }
+
+    private static void ProfileApplyStateRecovery()
+    {
+        if (Form1.ShouldEnableProfileApply(false, true, false, true))
+            throw new InvalidOperationException("Unreliable detection must disable Apply despite an old monitor-set mismatch.");
+        if (Form1.ShouldEnableProfileApply(true, true, false, false))
+            throw new InvalidOperationException("An active transaction must disable Apply.");
+        if (!Form1.ShouldEnableProfileApply(true, true, false, true))
+            throw new InvalidOperationException("Reliable detection and a released gate must allow a different profile.");
+        if (Form1.ShouldEnableProfileApply(true, true, true, true))
+            throw new InvalidOperationException("An already-active profile must not allow repeat Apply.");
     }
 
     private static void ScaleLogicalMetrics()
